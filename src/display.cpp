@@ -11,6 +11,7 @@
 #include "storage.h"
 #include "wifi_server.h"
 #include "runlog.h"
+#include "pinscan.h"
 
 #include <Wire.h>
 #include <Adafruit_GFX.h>
@@ -36,6 +37,7 @@ enum MenuItem : uint8_t {
     MENU_AUTOTUNE_LOWER,
     MENU_AUTOTUNE_UPPER,
     MENU_OUTPUTS,
+    MENU_PINTOGGLE,
     MENU_COUNT
 };
 
@@ -45,7 +47,8 @@ static const char* const menuLabels[MENU_COUNT] = {
     "WiFi Info",
     "AutoTune Lower",
     "AutoTune Upper",
-    "All Outputs Off"
+    "All Outputs Off",
+    "Pin Scanner"
 };
 
 static int menuSel = 0;
@@ -63,7 +66,7 @@ static void drawSplash() {
     oled.setCursor(20, 26);
     oled.print(F("Still Controller"));
     oled.setCursor(46, 42);
-    oled.print(F("v1.0"));
+    oled.print(F("v1.1"));
     oled.drawRect(0, 0, 128, 64, SSD1306_WHITE);
 }
 
@@ -310,6 +313,68 @@ static void drawEStop() {
     oled.print(F("[SET] to clear"));
 }
 
+// ─── Pin Toggle Screen ──────────────────────────────────────────────────────
+// Navigate with UP/DOWN to select pin index, SELECT to toggle HIGH/LOW.
+// S/S (Start/Stop) returns to menu. Active pin shown with port name.
+
+static int ptIdx = 0;       // Index into SCAN_PINS[]
+static bool ptActive = false; // Is the selected pin currently driven HIGH?
+
+static void drawPinToggle() {
+    int pin = SCAN_PINS[ptIdx];
+    int activePin = scanGetActivePin();
+    ptActive = (activePin == pin);
+
+    oled.setTextSize(1);
+    oled.setCursor(0, 0);
+    oled.print(F("=== Pin Scanner ==="));
+    oled.drawLine(0, 9, 127, 9, SSD1306_WHITE);
+
+    // Show pin number and port name (big)
+    oled.setTextSize(2);
+    oled.setCursor(0, 14);
+    oled.print(F("D"));
+    oled.print(pin);
+
+    oled.setTextSize(1);
+    oled.setCursor(70, 14);
+    oled.print(pinPortName(pin));
+
+    // Show state
+    oled.setCursor(70, 24);
+    if (ptActive) {
+        oled.fillRoundRect(68, 22, 56, 12, 3, SSD1306_WHITE);
+        oled.setTextColor(SSD1306_BLACK);
+        oled.print(F("  HIGH"));
+        oled.setTextColor(SSD1306_WHITE);
+    } else {
+        oled.drawRoundRect(68, 22, 56, 12, 3, SSD1306_WHITE);
+        oled.print(F("  LOW"));
+    }
+
+    // Index counter
+    oled.setTextSize(1);
+    oled.setCursor(0, 36);
+    oled.print(ptIdx + 1);
+    oled.print(F("/"));
+    oled.print(NUM_SCAN_PINS);
+
+    // If any pin is active (could be different from selected)
+    if (activePin >= 0 && activePin != pin) {
+        oled.setCursor(40, 36);
+        oled.print(F("(D"));
+        oled.print(activePin);
+        oled.print(F(" on)"));
+    }
+
+    // Button hints
+    oled.drawLine(0, 47, 127, 47, SSD1306_WHITE);
+    oled.setCursor(0, 50);
+    oled.print(F("\x18\x19 pin  [SET]=toggle"));
+    oled.setCursor(0, 58);
+    oled.print(F("[S/S]=back  sel+hold=off"));
+}
+
 // ─── Menu Action Execution ──────────────────────────────────────────────────
 
 static void executeMenuItem() {
@@ -347,6 +412,10 @@ static void executeMenuItem() {
         case MENU_OUTPUTS:
             allOutputsOff();
             currentScreen = SCREEN_DASHBOARD;
+            break;
+        case MENU_PINTOGGLE:
+            currentScreen = SCREEN_PINTOGGLE;
+            ptIdx = 0;
             break;
         default:
             break;
@@ -419,6 +488,37 @@ void handleButton(ButtonEvent evt) {
         case SCREEN_WIFI_INFO:
             if (evt == BTN_SS_PRESS || evt == BTN_SELECT_PRESS) {
                 currentScreen = SCREEN_DASHBOARD;
+            }
+            break;
+
+        case SCREEN_PINTOGGLE:
+            switch (evt) {
+                case BTN_UP_PRESS:
+                    if (ptIdx > 0) ptIdx--;
+                    break;
+                case BTN_DOWN_PRESS:
+                    if (ptIdx < NUM_SCAN_PINS - 1) ptIdx++;
+                    break;
+                case BTN_SELECT_PRESS: {
+                    // Toggle selected pin
+                    int pin = SCAN_PINS[ptIdx];
+                    if (scanGetActivePin() == pin) {
+                        scanAllOff();
+                    } else {
+                        scanSetPin(pin);
+                    }
+                    break;
+                }
+                case BTN_SELECT_LONG:
+                    // All off
+                    scanAllOff();
+                    break;
+                case BTN_SS_PRESS:
+                    // Back to menu
+                    scanAllOff();
+                    currentScreen = SCREEN_MENU;
+                    break;
+                default: break;
             }
             break;
 
@@ -519,11 +619,12 @@ void updateDisplay() {
     oled.clearDisplay();
 
     switch (currentScreen) {
-        case SCREEN_SPLASH:     drawSplash();     break;
-        case SCREEN_DASHBOARD:  drawDashboard();  break;
-        case SCREEN_MENU:       drawMenu();       break;
-        case SCREEN_ESTOP:      drawEStop();      break;
-        case SCREEN_WIFI_INFO:  drawWiFiInfo();   break;
+        case SCREEN_SPLASH:      drawSplash();     break;
+        case SCREEN_DASHBOARD:   drawDashboard();  break;
+        case SCREEN_MENU:        drawMenu();       break;
+        case SCREEN_ESTOP:       drawEStop();      break;
+        case SCREEN_WIFI_INFO:   drawWiFiInfo();   break;
+        case SCREEN_PINTOGGLE:   drawPinToggle();  break;
     }
 
     oled.display();

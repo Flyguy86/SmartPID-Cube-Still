@@ -12,6 +12,7 @@
 #include "pages.h"
 #include "scheduler.h"
 #include "runlog.h"
+#include "pinscan.h"
 
 static bool wifiReady = false;
 static bool staMode = false;   // true = STA (client), false = AP (hotspot)
@@ -459,6 +460,45 @@ static void handlePWMSet(int connId, const char* query) {
     sendOK(connId);
 }
 
+// ─── Pin Scanner HTTP API ───────────────────────────────────────────────────
+// /api/pintest?p=N   → set Arduino pin N HIGH (previous off). p=-1 for all off.
+// /api/pintest       → report currently active pin
+
+static void handlePinTest(int connId, const char* query) {
+    char val[8];
+    if (getParam(query, "p", val, sizeof(val))) {
+        int p = atoi(val);
+        if (p < 0) {
+            scanAllOff();
+        } else {
+            scanSetPin(p);
+        }
+        // Respond with pin state
+        char resp[96];
+        int active = scanGetActivePin();
+        if (active >= 0) {
+            snprintf(resp, sizeof(resp),
+                "{\"ok\":true,\"pin\":%d,\"port\":\"%s\",\"state\":\"HIGH\"}",
+                active, pinPortName(active));
+        } else {
+            strcpy(resp, "{\"ok\":true,\"pin\":-1,\"state\":\"OFF\"}");
+        }
+        sendJSON(connId, resp, strlen(resp));
+    } else {
+        // No param — report status
+        char resp[96];
+        int active = scanGetActivePin();
+        if (active >= 0) {
+            snprintf(resp, sizeof(resp),
+                "{\"pin\":%d,\"port\":\"%s\",\"state\":\"HIGH\"}",
+                active, pinPortName(active));
+        } else {
+            strcpy(resp, "{\"pin\":-1,\"state\":\"OFF\"}");
+        }
+        sendJSON(connId, resp, strlen(resp));
+    }
+}
+
 static void handleWifiSave(int connId, const char* query) {
     Settings& s = getSettings();
     char raw[65];
@@ -592,7 +632,10 @@ static void handleProfileName(int connId, const char* query) {
         urlDecode(s.profiles[p].name, raw, sizeof(s.profiles[p].name));
     }
     saveSettings();
-    sendOK(connId);
+    // Confirm with stored name
+    char json[64];
+    int n = snprintf(json, sizeof(json), "{\"ok\":true,\"name\":\"%s\"}", s.profiles[p].name);
+    sendJSON(connId, json, n);
 }
 
 // GET /api/profile/resize?p=0&n=3 → set number of steps
@@ -612,7 +655,10 @@ static void handleProfileResize(int connId, const char* query) {
     }
     s.profiles[p].numSteps = n;
     saveSettings();
-    sendOK(connId);
+    // Confirm with stored count
+    char json[48];
+    int jn = snprintf(json, sizeof(json), "{\"ok\":true,\"n\":%d}", s.profiles[p].numSteps);
+    sendJSON(connId, json, jn);
 }
 
 // GET /api/profile/step?p=0&s=0&hold=60&cool=0&na=1&s0=0&o0=0&m0=255&t0=175.0
@@ -654,7 +700,12 @@ static void handleProfileStepSave(int connId, const char* query) {
     SerialUSB.print(F(": na=")); SerialUSB.print(step.numAssignments);
     SerialUSB.print(step.coolMode ? F(" COOL") : F(" HEAT"));
     SerialUSB.print(F(" hold=")); SerialUSB.println(step.holdMinutes);
-    sendOK(connId);
+    // Confirm with stored values
+    char json[80];
+    int jn = snprintf(json, sizeof(json),
+        "{\"ok\":true,\"s\":%d,\"na\":%d,\"hold\":%d}",
+        si, step.numAssignments, step.holdMinutes);
+    sendJSON(connId, json, jn);
 }
 
 static void handleStart(int connId) {
@@ -1073,6 +1124,9 @@ static void handleHTTPRequest(int connId, const char* data, int len) {
     }
     else if (strcmp(path, "/api/log/recent") == 0) {
         handleLogRecent(connId);
+    }
+    else if (strcmp(path, "/api/pintest") == 0) {
+        handlePinTest(connId, query);
     }
     else {
         send404(connId);

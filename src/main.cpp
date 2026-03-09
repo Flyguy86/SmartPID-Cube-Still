@@ -21,6 +21,7 @@
 #include "buttons.h"
 #include "display.h"
 #include "runlog.h"
+#include "pinscan.h"
 
 // ─── Button + Display task wrapper ──────────────────────────────────────────
 // Polls buttons and feeds events to display/menu handler.
@@ -79,7 +80,7 @@ void setup() {
     delay(300);
 
     SerialUSB.println();
-    SerialUSB.println(F("=== SmartPID Still Controller v1.0 ==="));
+    SerialUSB.println(F("=== SmartPID Still Controller v1.1 ==="));
     SerialUSB.println(F("    ATSAMD21G18 + ESP8266 WiFi"));
     SerialUSB.println();
 
@@ -164,6 +165,68 @@ void setup() {
 //
 // Critical tasks also run inside blocking WiFi AT waits via yieldCritical()
 
+// ─── Serial Pin Scanner (debug) ────────────────────────────────────────────
+// Commands via SerialUSB:
+//   pin N       Set Arduino pin N HIGH (previous pin turned off)
+//   off         All scanned pins off
+//   scan        Auto-cycle all safe pins, 3s each
+//   pwm N V     analogWrite pin N with value V
+static char serialCmd[32];
+static int serialPos = 0;
+
+static void processSerialCmd(const char* cmd) {
+    if (strncmp(cmd, "pin ", 4) == 0) {
+        int p = atoi(cmd + 4);
+        scanAutoStop();
+        scanSetPin(p);
+    }
+    else if (strncmp(cmd, "pwm ", 4) == 0) {
+        // "pwm 10 255"
+        int p = atoi(cmd + 4);
+        const char* sp = strchr(cmd + 4, ' ');
+        int v = sp ? atoi(sp + 1) : 255;
+        pinMode(p, OUTPUT);
+        analogWrite(p, v);
+        SerialUSB.print(F("[scan] analogWrite("));
+        SerialUSB.print(p);
+        SerialUSB.print(F(", "));
+        SerialUSB.print(v);
+        SerialUSB.println(F(")"));
+    }
+    else if (strcmp(cmd, "off") == 0) {
+        scanAllOff();
+    }
+    else if (strcmp(cmd, "scan") == 0) {
+        scanAutoStart();
+    }
+    else {
+        SerialUSB.println(F("[scan] Commands: pin N | off | scan | pwm N V"));
+    }
+}
+
+static void checkSerialCommands() {
+    while (SerialUSB.available()) {
+        char c = SerialUSB.read();
+        SerialUSB.print(F("[rx:"));
+        SerialUSB.print((int)c);
+        SerialUSB.print(F("]"));
+        if (c == '\n' || c == '\r') {
+            if (serialPos > 0) {
+                serialCmd[serialPos] = '\0';
+                SerialUSB.print(F("[cmd:'"));
+                SerialUSB.print(serialCmd);
+                SerialUSB.println(F("']"));
+                processSerialCmd(serialCmd);
+                serialPos = 0;
+            }
+        } else if (serialPos < (int)sizeof(serialCmd) - 1) {
+            serialCmd[serialPos++] = c;
+        }
+    }
+    // Auto-scan advance
+    scanAutoTick();
+}
+
 void loop() {
     schedulerRun();
-}
+    checkSerialCommands();}

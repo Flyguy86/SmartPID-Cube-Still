@@ -13,7 +13,8 @@ enum Screen : uint8_t {
     SCREEN_DASHBOARD,      // Main: temps + step + state
     SCREEN_MENU,           // Menu with Up/Down/Select navigation
     SCREEN_ESTOP,          // Emergency stop overlay
-    SCREEN_WIFI_INFO       // WiFi details
+    SCREEN_WIFI_INFO,      // WiFi details
+    SCREEN_PINTOGGLE       // GPIO pin toggle (debug)
 };
 
 void initDisplay();

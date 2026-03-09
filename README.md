@@ -64,6 +64,19 @@ The OS will auto-mount the FAT12 volume. You must unmount it so `dd` can write t
 sudo umount /media/$USER/SmartPID
 ```
 
+**Step 3b — Verify `/dev/sdb` is a block device**
+
+If a previous `dd` ran when the device wasn't present, `/dev/sdb` may have been created as a regular file, silently absorbing all writes. Verify it's a real block device:
+
+```bash
+ls -la /dev/sdb
+# Must show 'b' at start (e.g. brw-r--r--), NOT '-' (regular file)
+# If it's a regular file, fix it:
+sudo rm /dev/sdb && sudo mknod /dev/sdb b 8 16
+```
+
+A real write to USB takes ~2 seconds (130 kB/s). If `dd` completes in <0.01s at >10 MB/s, you're writing to a file, not the device.
+
 **Step 4 — Pad the binary to the full app region size (245,760 bytes)**
 
 The compiled firmware is typically much smaller than the full app region. Pad it with `0xFF` bytes (the erased-flash state for NOR flash):

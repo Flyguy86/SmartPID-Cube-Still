@@ -44,6 +44,10 @@ void setOutput(int index, bool state) {
     if (index < 0 || index >= NUM_OUTPUTS) return;
     outputStates[index] = state;
     digitalWrite(OUTPUT_PINS[index], state ? HIGH : LOW);
+    // SSR hardware is on the PWM pin (PA18), not the digital pin (PA12)
+    if (index == OUT_SSR) {
+        setSSRPWM(state ? 255 : 0);
+    }
 }
 
 bool getOutput(int index) {
