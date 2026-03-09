@@ -77,7 +77,7 @@ a{color:#ff6b35}
 <div class="nav"><a href="/profiles">&#128295; Profiles</a> &middot; <a href="/settings">&#9881; Settings</a> &middot; <a href="/log">&#128202; Run Log</a></div>
 <script>
 var O=[0,0,0,0,0],RS=0,iv,_busy=0;
-function gate(fn){if(_busy)return;_busy=1;setTimeout(function(){_busy=0},1000);fn();}
+function gate(fn){if(_busy)return;_busy=1;setTimeout(function(){_busy=0},2000);fn();}
 function tog(i){gate(function(){fetch('/api/output?id='+i+'&s='+(O[i]?0:1)).then(poll)})}
 function rctl(){gate(function(){fetch('/api/'+(RS==0||RS==3?'start':'stop')).then(poll)})}
 function poll(){fetch('/api/status').then(function(r){return r.arrayBuffer()}).then(function(b){
@@ -171,7 +171,7 @@ a{color:#ff6b35}
 <div class="nav"><a href="/">&larr; Dashboard</a> &middot; <a href="/settings">&#9881; Settings</a> &middot; <a href="/log">&#128202; Run Log</a></div>
 <script>
 var CP=0,AP=0,P=[],D=[],ON=['SSR','RL1','RL2','DC1','DC2'],_busy=0;
-function gate(fn){if(_busy)return;_busy=1;setTimeout(function(){_busy=0},1000);fn();}
+function gate(fn){if(_busy)return;_busy=1;setTimeout(function(){_busy=0},2000);fn();}
 function selP(p){gate(function(){CP=p;
  for(var i=0;i<3;i++)document.getElementById('pb'+i).className='btn '+(i==p?'on':'off');
  document.getElementById('pn').value=P[p]?P[p].name:'';
