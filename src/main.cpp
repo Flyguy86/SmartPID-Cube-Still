@@ -1,0 +1,160 @@
+// ═══════════════════════════════════════════════════════════════════════════════
+//  SmartPID CUBE — Beer/Spirits Distillation Controller
+//  Hardware: ATSAMD21G18 (main) + ESP-WROOM-02 (WiFi co-processor)
+//  Web interface served via ESP8266 AT commands on port 80
+//  Default AP: "SmartPID-Still" / password "distill1"
+//
+//  Task Priorities:
+//    CRITICAL — updateSensors + updatePID (safety, never starved)
+//    HIGH     — wifiPoll (HTTP serving)
+//    NORMAL   — updateAutoTune
+//    LOW      — debugPrint, schedulerPrintStats
+// ═══════════════════════════════════════════════════════════════════════════════
+
+#include <Arduino.h>
+#include "config.h"
+#include "storage.h"
+#include "sensors.h"
+#include "outputs.h"
+#include "wifi_server.h"
+#include "scheduler.h"
+#include "buttons.h"
+#include "display.h"
+
+// ─── Button + Display task wrapper ──────────────────────────────────────────
+// Polls buttons and feeds events to display/menu handler.
+// Also enforces emergency stop — if ESTOP is active, outputs stay off.
+
+static void updateUI() {
+    ButtonEvent evt = pollButtons();
+    handleButton(evt);
+
+    // Safety enforcement: if ESTOP is active, ensure outputs stay killed
+    if (isEmergencyStopped()) {
+        allOutputsOff();
+    }
+}
+
+// ─── Debug serial print (every 5 s) ────────────────────────────────────────
+// Note: interval is now managed by the scheduler, so no internal gating needed
+
+static void debugPrint() {
+    SerialUSB.print(F("[temp] lower="));
+    if (isSensorConnected(0))
+        SerialUSB.print(getSensorTemp(0), 1);
+    else
+        SerialUSB.print(F("N/C"));
+
+    SerialUSB.print(F(" upper="));
+    if (isSensorConnected(1))
+        SerialUSB.print(getSensorTemp(1), 1);
+    else
+        SerialUSB.print(F("N/C"));
+
+    RunState rs = getRunState();
+    if (rs != RUN_IDLE) {
+        const char* states[] = { "IDLE", "HEAT", "HOLD", "DONE" };
+        SerialUSB.print(F("  run="));
+        SerialUSB.print(states[rs]);
+        SerialUSB.print(F(" PWM="));
+        SerialUSB.print(getSSRPWM());
+        if (rs == RUN_HOLDING) {
+            SerialUSB.print(F(" rem="));
+            SerialUSB.print(getHoldRemaining());
+            SerialUSB.print(F("s"));
+        }
+    }
+    SerialUSB.println();
+}
+
+// ─── Setup ──────────────────────────────────────────────────────────────────
+
+void setup() {
+    SerialUSB.begin(115200);
+
+    // Wait up to 3 s for USB serial console
+    unsigned long start = millis();
+    while (!SerialUSB && millis() - start < 3000) delay(10);
+    delay(300);
+
+    SerialUSB.println();
+    SerialUSB.println(F("=== SmartPID Still Controller v1.0 ==="));
+    SerialUSB.println(F("    ATSAMD21G18 + ESP8266 WiFi"));
+    SerialUSB.println();
+
+    // Load persisted settings from flash
+    loadSettings();
+    Settings& s = getSettings();
+    SerialUSB.print(F("WiFi: "));
+    SerialUSB.println(s.wifi.configured ? s.wifi.ssid : "(not configured)");
+    SerialUSB.print(F("Profile: "));
+    SerialUSB.print(s.profile.numSteps);
+    SerialUSB.print(F(" steps, step1: target="));
+    SerialUSB.print(s.profile.steps[0].targetTemp, 1);
+    SerialUSB.print(F("F hold="));
+    SerialUSB.print(s.profile.steps[0].holdMinutes);
+    SerialUSB.print(F("min sensor="));
+    SerialUSB.print(s.profile.steps[0].sensorIndex);
+    SerialUSB.print(F(" maxPWM="));
+    SerialUSB.println(s.profile.steps[0].maxPWM);
+    SerialUSB.println();
+
+    // Initialize subsystems
+    initSensors();
+    initOutputs();
+    initPID();
+    initButtons();
+    initDisplay();          // Show splash immediately
+    initWiFi();
+
+    // ── Register tasks with priority scheduler ──────────────────────────────
+    schedulerInit();
+
+    // CRITICAL (Priority 0) — Safety: sensors + PID + UI/ESTOP must never be starved
+    // These also run via yieldCritical() inside blocking WiFi waits
+    schedulerAddTask(updateSensors,  PRIORITY_CRITICAL, 0,    0, "Sensors");
+    schedulerAddTask(updatePID,      PRIORITY_CRITICAL, 0,    0, "PID");
+    schedulerAddTask(updateUI,       PRIORITY_CRITICAL, 20,   0, "Buttons");
+
+    // HIGH (Priority 1) — WiFi HTTP serving + display refresh
+    // Time-budgeted: processes up to 128 bytes per call, yields back
+    schedulerAddTask(wifiPoll,       PRIORITY_HIGH,     0,    0, "WiFi");
+    schedulerAddTask(updateDisplay,  PRIORITY_HIGH,     250,  0, "Display");
+
+    // NORMAL (Priority 2) — Auto-tune runs only when active
+    schedulerAddTask(updateAutoTune, PRIORITY_NORMAL,   0,    0, "AutoTune");
+
+    // LOW (Priority 3) — Debug output + scheduler diagnostics + sensor hot-plug
+    schedulerAddTask(debugPrint,     PRIORITY_LOW,      5000, 0, "Debug");
+    schedulerAddTask(schedulerPrintStats, PRIORITY_LOW, 30000, 0, "Stats");
+    schedulerAddTask(rescanSensors,  PRIORITY_LOW,      5000, 0, "Rescan");
+
+    SerialUSB.println(F("[sched] 10 tasks registered"));
+
+    // Ready beep
+    tone(PIN_BUZZER, 2000, 100);
+    delay(150);
+    tone(PIN_BUZZER, 2500, 100);
+
+    SerialUSB.println();
+    SerialUSB.println(F("=== Ready ==="));
+    if (isWiFiReady()) {
+        SerialUSB.println(F("Connect to open WiFi 'SmartPID-Still' (no password)"));
+        SerialUSB.println(F("Open http://192.168.4.1/ in browser"));
+    }
+    SerialUSB.println();
+}
+
+// ─── Main Loop ──────────────────────────────────────────────────────────────
+//
+// All work is done by the scheduler in priority order:
+//   1. CRITICAL: updateSensors → updatePID  (every cycle)
+//   2. HIGH:     wifiPoll                    (every cycle, time-budgeted)
+//   3. NORMAL:   updateAutoTune              (every cycle, self-gated)
+//   4. LOW:      debugPrint (5s), stats (30s)
+//
+// Critical tasks also run inside blocking WiFi AT waits via yieldCritical()
+
+void loop() {
+    schedulerRun();
+}

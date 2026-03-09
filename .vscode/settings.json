@@ -1,0 +1,8 @@
+{
+    "chat.tools.terminal.autoApprove": {
+        "/^cd /home/brian/SmartPID-Still && python3 -c \"\nimport struct\n\ndata = open\\('SPC1000-biab-v1\\.3-010\\.bin', 'rb'\\)\\.read\\(\\)\nBOOT = 0x4000\ntable_offset = 0x29EA8 - BOOT\n\n# Print raw hex for first 5 entries to understand encoding  \nfor i in range\\(5\\):\n    pos = table_offset \\+ i \\* 24\n    raw = data\\[pos:pos\\+24\\]\n    fields = struct\\.unpack_from\\('<6I', data, pos\\)\n    print\\(f'\\[\\{i:2d\\}\\] hex: \\{raw\\.hex\\(\\)\\} -> \\{\\\\\" \\\\\"\\.join\\(f\\\\\"\\{f:08x\\}\\\\\" for f in fields\\)\\}'\\)\n\n# Try byte-level decode: maybe ADC/PWM are packed as smaller fields\nprint\\(\\)\nprint\\('Byte-level decode of first 10 entries:'\\)\nprint\\(f'\\{\\\\\"Idx\\\\\":>3\\} \\{\\\\\"Port\\\\\":>4\\} \\{\\\\\"Pin\\\\\":>3\\} \\{\\\\\"Type\\\\\":>4\\} \\{\\\\\"Attr\\\\\":>4\\}  ADC   bytes16-19       bytes20-23'\\)\nfor i in range\\(40\\):\n    pos = table_offset \\+ i \\* 24\n    if pos \\+ 24 > len\\(data\\):\n        break\n    port, pin, ptype, attr = struct\\.unpack_from\\('<4I', data, pos\\)\n    if port > 1 or pin > 31:\n        break\n    # Bytes 16-19 and 20-23 as individual bytes\n    b16 = struct\\.unpack_from\\('4B', data, pos\\+16\\)\n    b20 = struct\\.unpack_from\\('4B', data, pos\\+20\\)\n    port_name = 'PA' if port == 0 else 'PB'\n    print\\(f'\\[\\{i:2d\\}\\] \\{port_name:>4\\}\\{pin:3d\\}  t=\\{ptype:3d\\} a=0x\\{attr:02x\\}  \\[\\{b16\\[0\\]:3d\\},\\{b16\\[1\\]:3d\\},\\{b16\\[2\\]:3d\\},\\{b16\\[3\\]:3d\\}\\]  \\[\\{b20\\[0\\]:3d\\},\\{b20\\[1\\]:3d\\},\\{b20\\[2\\]:3d\\},\\{b20\\[3\\]:3d\\}\\]'\\)\n\"\n$/": {
+            "approve": true,
+            "matchCommandLine": true
+        }
+    }
+}

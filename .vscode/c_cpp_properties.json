@@ -1,0 +1,88 @@
+//
+// !!! WARNING !!! AUTO-GENERATED FILE!
+// PLEASE DO NOT MODIFY IT AND USE "platformio.ini":
+// https://docs.platformio.org/page/projectconf/section_env_build.html#build-flags
+//
+{
+    "configurations": [
+        {
+            "name": "PlatformIO",
+            "includePath": [
+                "/home/brian/SmartPID-Still/include",
+                "/home/brian/SmartPID-Still/src",
+                "/home/brian/.platformio/packages/framework-arduino-samd/libraries/Wire",
+                "/home/brian/SmartPID-Still/.pio/libdeps/samd21_diag/DallasTemperature",
+                "/home/brian/SmartPID-Still/.pio/libdeps/samd21_diag/OneWire",
+                "/home/brian/.platformio/packages/framework-arduino-samd/cores/arduino/api/deprecated",
+                "/home/brian/.platformio/packages/framework-arduino-samd/cores/arduino/api/deprecated-avr-comp",
+                "/home/brian/.platformio/packages/framework-cmsis/CMSIS/Include",
+                "/home/brian/.platformio/packages/framework-cmsis-atmel/CMSIS/Device/ATMEL",
+                "/home/brian/.platformio/packages/framework-arduino-samd/cores/arduino",
+                "/home/brian/.platformio/packages/framework-arduino-samd/variants/arduino_zero",
+                "/home/brian/.platformio/packages/framework-arduino-samd/libraries/HID",
+                "/home/brian/.platformio/packages/framework-arduino-samd/libraries/I2S/src",
+                "/home/brian/.platformio/packages/framework-arduino-samd/libraries/SAMD_AnalogCorrection/src",
+                "/home/brian/.platformio/packages/framework-arduino-samd/libraries/SAMD_BootloaderUpdater/src",
+                "/home/brian/.platformio/packages/framework-arduino-samd/libraries/SBU/src",
+                "/home/brian/.platformio/packages/framework-arduino-samd/libraries/SDU/src",
+                "/home/brian/.platformio/packages/framework-arduino-samd/libraries/SFU/src",
+                "/home/brian/.platformio/packages/framework-arduino-samd/libraries/SNU/src",
+                "/home/brian/.platformio/packages/framework-arduino-samd/libraries/SPI",
+                "/home/brian/.platformio/packages/framework-arduino-samd/libraries/SSU/src",
+                "/home/brian/.platformio/packages/framework-arduino-samd/libraries/USBHost/src",
+                ""
+            ],
+            "browse": {
+                "limitSymbolsToIncludedHeaders": true,
+                "path": [
+                    "/home/brian/SmartPID-Still/include",
+                    "/home/brian/SmartPID-Still/src",
+                    "/home/brian/.platformio/packages/framework-arduino-samd/libraries/Wire",
+                    "/home/brian/SmartPID-Still/.pio/libdeps/samd21_diag/DallasTemperature",
+                    "/home/brian/SmartPID-Still/.pio/libdeps/samd21_diag/OneWire",
+                    "/home/brian/.platformio/packages/framework-arduino-samd/cores/arduino/api/deprecated",
+                    "/home/brian/.platformio/packages/framework-arduino-samd/cores/arduino/api/deprecated-avr-comp",
+                    "/home/brian/.platformio/packages/framework-cmsis/CMSIS/Include",
+                    "/home/brian/.platformio/packages/framework-cmsis-atmel/CMSIS/Device/ATMEL",
+                    "/home/brian/.platformio/packages/framework-arduino-samd/cores/arduino",
+                    "/home/brian/.platformio/packages/framework-arduino-samd/variants/arduino_zero",
+                    "/home/brian/.platformio/packages/framework-arduino-samd/libraries/HID",
+                    "/home/brian/.platformio/packages/framework-arduino-samd/libraries/I2S/src",
+                    "/home/brian/.platformio/packages/framework-arduino-samd/libraries/SAMD_AnalogCorrection/src",
+                    "/home/brian/.platformio/packages/framework-arduino-samd/libraries/SAMD_BootloaderUpdater/src",
+                    "/home/brian/.platformio/packages/framework-arduino-samd/libraries/SBU/src",
+                    "/home/brian/.platformio/packages/framework-arduino-samd/libraries/SDU/src",
+                    "/home/brian/.platformio/packages/framework-arduino-samd/libraries/SFU/src",
+                    "/home/brian/.platformio/packages/framework-arduino-samd/libraries/SNU/src",
+                    "/home/brian/.platformio/packages/framework-arduino-samd/libraries/SPI",
+                    "/home/brian/.platformio/packages/framework-arduino-samd/libraries/SSU/src",
+                    "/home/brian/.platformio/packages/framework-arduino-samd/libraries/USBHost/src",
+                    ""
+                ]
+            },
+            "defines": [
+                "PLATFORMIO=60119",
+                "ARDUINO_SAMD_ZERO",
+                "__SAMD21G18A__",
+                "ARDUINO=10805",
+                "F_CPU=48000000L",
+                "USBCON",
+                "USB_VID=0x2341",
+                "USB_PID=0x804D",
+                "USB_PRODUCT=\"Arduino Zero\"",
+                "USB_MANUFACTURER=\"Arduino\"",
+                "ARDUINO_ARCH_SAMD",
+                ""
+            ],
+            "cStandard": "gnu11",
+            "cppStandard": "gnu++11",
+            "compilerPath": "/home/brian/.platformio/packages/toolchain-gccarmnoneeabi/bin/arm-none-eabi-gcc",
+            "compilerArgs": [
+                "-mcpu=cortex-m0plus",
+                "-mthumb",
+                ""
+            ]
+        }
+    ],
+    "version": 4
+}

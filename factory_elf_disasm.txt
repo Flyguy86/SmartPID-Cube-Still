@@ -1,0 +1,3 @@
+
+/tmp/firmware.elf:     file format elf32-littlearm
+
