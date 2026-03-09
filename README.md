@@ -127,7 +127,7 @@ sync && echo "Flash complete — power cycle now"
 ## Features
 
 ### Multi-Step Distillation Profiles
-- Up to **8 sequential steps**, each with independent target temperature, hold time, sensor selection, and max PWM
+- Up to **20 sequential steps**, each with independent target temperature, hold time, sensor selection, output selection, and max PWM
 - Automatic step advancement with buzzer notifications
 - Safety shutoff on sensor disconnect
 
@@ -146,9 +146,13 @@ sync && echo "Flash complete — power cycle now"
 
 ### Web Interface
 - **Dashboard** (`/`) — live sensor readings, output toggles, SSR PWM slider, run profile status
-- **Settings** (`/settings`) — WiFi network config, PID tuning per sensor, profile step editor, auto-tune trigger
+- **Profiles** (`/profiles`) — 3 storable profiles with multi-step, multi-sensor assignments, heat/cool mode
+- **Settings** (`/settings`) — WiFi network config, PID tuning per sensor, auto-tune trigger
+- **Run Log** (`/log`) — event log viewer with CSV export
 - Mobile-first dark theme, minimal HTML for fast transfer
 - WiFi scan with network picker
+
+> **Note on Web Interface Speed:** The SmartPID CUBE hardware uses an ESP-WROOM-02 (ESP8266) as a WiFi co-processor, controlled by the SAMD21 over a **serial UART bridge using AT commands**. Every HTTP request and response must pass through this serial link — each chunk of data requires a multi-step AT+CIPSEND handshake (send command → wait for `>` prompt → send data → wait for `SEND OK`). This means the web interface is inherently slower than a typical web server. The firmware includes several mitigations (binary status protocol, combined header+body sends, request throttling, cache headers), but page loads and API calls will still feel sluggish compared to a native WiFi MCU like the ESP32. Rapid clicking can overwhelm the serial pipeline, so the UI enforces a 1-second cooldown between user-initiated actions.
 
 ### WiFi Modes
 - **AP mode** (default): Creates open network `SmartPID-Still`, accessible at `192.168.4.1`
@@ -211,20 +215,28 @@ Offset  Type     Field
 | Endpoint | Method | Format | Description |
 |----------|--------|--------|-------------|
 | `/` | GET | HTML | Dashboard page (cached 5 min) |
+| `/profiles` | GET | HTML | Profiles editor page (cached 5 min) |
 | `/settings` | GET | HTML | Settings page (cached 5 min) |
+| `/log` | GET | HTML | Run log viewer page (cached 5 min) |
 | `/api/status` | GET | Binary | 17-byte status packet (polled every 3s) |
-| `/api/settings` | GET | JSON | Full settings dump |
+| `/api/settings` | GET | JSON | WiFi SSID + PID config |
 | `/api/output?id=N&s=0\|1` | GET | JSON | Toggle output N on/off |
 | `/api/pwm?v=N` | GET | JSON | Set SSR PWM duty (0-255) |
 | `/api/wifi?ssid=X&pass=Y` | GET | JSON | Save WiFi credentials + connect |
 | `/api/pid?n=0\|1&kp=X&ki=X&kd=X&out=N` | GET | JSON | Save PID params for sensor N |
-| `/api/profile?step=N&target=X&hold=M&sensor=S&maxpwm=P` | GET | JSON | Save profile step N |
-| `/api/profile/add` | GET | JSON | Add a profile step |
-| `/api/profile/del?step=N` | GET | JSON | Delete profile step N |
-| `/api/start` | GET | JSON | Start running profile |
+| `/api/profiles` | GET | JSON | Summary of all 3 profiles (name, step count) |
+| `/api/profile/get?p=N` | GET | JSON | Full detail of profile N |
+| `/api/profile/select?p=N` | GET | JSON | Set active profile |
+| `/api/profile/name?p=N&name=X` | GET | JSON | Set profile name |
+| `/api/profile/resize?p=N&n=M` | GET | JSON | Set number of steps in profile |
+| `/api/profile/step?p=N&s=M&...` | GET | JSON | Save step M with assignments |
+| `/api/start` | GET | JSON | Start running active profile |
 | `/api/stop` | GET | JSON | Stop profile + all outputs off |
 | `/api/scan` | GET | JSON | Scan WiFi networks |
 | `/api/autotune?n=0\|1` | GET | JSON | Toggle auto-tune for sensor N |
+| `/api/log?which=active\|last` | GET | JSON | Full run log with entries |
+| `/api/log/csv?which=active\|last` | GET | CSV | Download run log as CSV |
+| `/api/log/recent` | GET | JSON | Last 15 log entries (dashboard) |
 
 ## Project Structure
 

@@ -63,8 +63,10 @@ enum RunState : uint8_t {
 };
 
 // ─── Persistent Settings ────────────────────────────────────────────────────
-#define SETTINGS_MAGIC  0xD15711F1  // Changed: multi-step profiles
-#define MAX_PROFILE_STEPS 8
+#define SETTINGS_MAGIC  0xD15711F2  // Changed: multi-profile + multi-assignment
+#define MAX_ASSIGNMENTS_PER_STEP 2  // Max sensors per step (we have 2 probes)
+#define MAX_PROFILE_STEPS 10
+#define MAX_PROFILES 3
 
 struct PIDParams {
     float Kp;
@@ -83,16 +85,25 @@ struct WiFiConfig {
     bool configured;
 };
 
-struct ProfileStep {
-    float    targetTemp;    // Target temperature in °F
-    uint16_t holdMinutes;   // Time to hold at target (minutes)
+struct SensorAssignment {
     uint8_t  sensorIndex;   // 0 = lower DS18B20, 1 = upper DS18B20
-    uint8_t  maxPWM;        // Maximum SSR PWM duty cycle (0-255)
-    uint8_t  outputIndex;   // Output to drive: 0=SSR, 1=RL1, 2=RL2, 3=DC1, 4=DC2
+    uint8_t  outputIndex;   // 0=SSR, 1=Relay1, 2=Relay2, 3=DC1, 4=DC2
+    uint8_t  maxPWM;        // Maximum duty cycle (0-255)
+    uint8_t  _pad;
+    float    targetTemp;    // Target temperature in °F
+};
+
+struct ProfileStep {
+    uint8_t  numAssignments; // Number of sensor assignments (0-2)
+    bool     coolMode;       // false = heat (all >= target), true = cool (all <= target)
+    uint16_t holdMinutes;    // Minutes to hold after ALL sensors reach target
+    SensorAssignment assignments[MAX_ASSIGNMENTS_PER_STEP];
 };
 
 struct RunProfile {
-    uint8_t     numSteps;
+    char     name[16];       // Profile name
+    uint8_t  numSteps;       // Number of steps (0 to MAX_PROFILE_STEPS)
+    uint8_t  _pad[3];
     ProfileStep steps[MAX_PROFILE_STEPS];
 };
 
@@ -100,5 +111,7 @@ struct Settings {
     uint32_t     magic;
     WiFiConfig   wifi;
     SensorConfig sensorCfg[2]; // [0] = lower probe, [1] = upper probe
-    RunProfile   profile;
+    uint8_t      activeProfile;  // Index of active profile (0-2)
+    uint8_t      _settingsPad[3];
+    RunProfile   profiles[MAX_PROFILES];
 };

@@ -10,6 +10,7 @@
 #include "outputs.h"
 #include "storage.h"
 #include "wifi_server.h"
+#include "runlog.h"
 
 #include <Wire.h>
 #include <Adafruit_GFX.h>
@@ -76,8 +77,8 @@ static void drawDashboard() {
     oled.setTextSize(1);
     oled.setCursor(0, 0);
     if (isWiFiReady()) {
-        if (s.wifi.configured && strlen(s.wifi.ssid) > 0) {
-            // Connected to a network
+        if (isWiFiSTA()) {
+            // Connected to home network as client
             // WiFi icon: 3 arcs
             oled.drawPixel(3, 6, SSD1306_WHITE);
             oled.drawCircle(3, 8, 2, SSD1306_WHITE);
@@ -138,27 +139,32 @@ static void drawDashboard() {
                 break;
             case RUN_HEATING: {
                 int cs = getCurrentStep();
-                ProfileStep& step = s.profile.steps[cs];
-                oled.print(F("HEAT Step "));
+                RunProfile& prof = s.profiles[s.activeProfile];
+                ProfileStep& step = prof.steps[cs];
+                oled.print(step.coolMode ? F("COOL ") : F("HEAT "));
+                oled.print(F("Step "));
                 oled.print(cs + 1);
                 oled.print(F("/"));
-                oled.print(s.profile.numSteps);
+                oled.print(prof.numSteps);
                 oled.setCursor(0, 41);
-                oled.print(F("Tgt:"));
-                oled.print(step.targetTemp, 1);
-                oled.print(F("F PWM:"));
-                oled.print(getSSRPWM());
-                oled.print(F("/"));
-                oled.print(step.maxPWM);
+                if (step.numAssignments > 0) {
+                    oled.print(F("Tgt:"));
+                    oled.print(step.assignments[0].targetTemp, 1);
+                    oled.print(F("F PWM:"));
+                    oled.print(getSSRPWM());
+                    oled.print(F("/"));
+                    oled.print(step.assignments[0].maxPWM);
+                }
                 break;
             }
             case RUN_HOLDING: {
                 int cs = getCurrentStep();
-                ProfileStep& step = s.profile.steps[cs];
+                RunProfile& prof = s.profiles[s.activeProfile];
+                ProfileStep& step = prof.steps[cs];
                 oled.print(F("HOLD Step "));
                 oled.print(cs + 1);
                 oled.print(F("/"));
-                oled.print(s.profile.numSteps);
+                oled.print(prof.numSteps);
                 oled.setCursor(0, 41);
                 unsigned long rem = getHoldRemaining();
                 unsigned long m = rem / 60;
@@ -254,20 +260,25 @@ static void drawWiFiInfo() {
         oled.print(F("WiFi: DISABLED"));
         oled.setCursor(0, 25);
         oled.print(F("ESP8266 not responding"));
-    } else {
-        oled.print(F("Mode: "));
-        if (s.wifi.configured) {
-            oled.print(F("STA+AP"));
-            oled.setCursor(0, 25);
-            oled.print(F("Net: "));
-            oled.print(s.wifi.ssid);
-        } else {
-            oled.print(F("AP Only"));
-        }
+    } else if (isWiFiSTA()) {
+        oled.print(F("Mode: Client (STA)"));
+        oled.setCursor(0, 25);
+        oled.print(F("Net: "));
+        oled.print(s.wifi.ssid);
         oled.setCursor(0, 37);
-        oled.print(F("AP: SmartPID-Still"));
-        oled.setCursor(0, 49);
+        oled.print(F("IP: "));
+        oled.print(getWiFiIP());
+    } else {
+        oled.print(F("Mode: Hotspot (AP)"));
+        oled.setCursor(0, 25);
+        oled.print(F("SSID: SmartPID-Still"));
+        oled.setCursor(0, 37);
         oled.print(F("IP: 192.168.4.1"));
+        if (isWiFiSTAFailed()) {
+            oled.setCursor(0, 49);
+            oled.print(F("! Join failed: "));
+            oled.print(s.wifi.ssid);
+        }
     }
 
     oled.setCursor(0, 56);
@@ -421,6 +432,11 @@ void handleButton(ButtonEvent evt) {
 void triggerEmergencyStop() {
     eStopped = true;
     currentScreen = SCREEN_ESTOP;
+
+    // Log ESTOP before stopping profile
+    if (getRunState() != RUN_IDLE && getRunState() != RUN_DONE) {
+        logEStop();
+    }
 
     // Kill everything immediately
     stopProfile();

@@ -2,15 +2,16 @@
 #include "sensors.h"
 #include "storage.h"
 #include "display.h"
+#include "runlog.h"
 
 // ─── Output state ───────────────────────────────────────────────────────────
 static bool outputStates[NUM_OUTPUTS] = { false };
 static int  ssrPWMDuty = 0;
 
 // ─── PID state ──────────────────────────────────────────────────────────────
-static float    pidIntegral  = 0;
-static float    pidLastInput = 0;
-static bool     pidFirstRun  = true;
+static float    pidIntegral[MAX_ASSIGNMENTS_PER_STEP];
+static float    pidLastInput[MAX_ASSIGNMENTS_PER_STEP];
+static bool     pidFirstRun[MAX_ASSIGNMENTS_PER_STEP];
 static RunState runState     = RUN_IDLE;
 static int      currentStep  = 0;
 static unsigned long holdStartMs  = 0;
@@ -69,33 +70,46 @@ void allOutputsOff() {
 // ─── PID Controller ─────────────────────────────────────────────────────────
 
 void initPID() {
-    pidIntegral  = 0;
-    pidLastInput = 0;
-    pidFirstRun  = true;
+    for (int i = 0; i < MAX_ASSIGNMENTS_PER_STEP; i++) {
+        pidIntegral[i]  = 0;
+        pidLastInput[i] = 0;
+        pidFirstRun[i]  = true;
+    }
     lastPIDTime  = millis();
 }
 
 void startProfile() {
     if (isAutoTuning()) return;  // Don't start profile during auto-tune
     Settings& s = getSettings();
-    if (s.profile.numSteps == 0) return;
+    RunProfile& prof = s.profiles[s.activeProfile];
+    if (prof.numSteps == 0) return;
     currentStep = 0;
     initPID();
     runState = RUN_HEATING;
-    holdDurationMs = (unsigned long)s.profile.steps[0].holdMinutes * 60UL * 1000UL;
+    holdDurationMs = (unsigned long)prof.steps[0].holdMinutes * 60UL * 1000UL;
+
+    logRunStart(prof.numSteps);
+    float firstTarget = prof.steps[0].numAssignments > 0 ?
+        prof.steps[0].assignments[0].targetTemp : 0;
+    logStepStart(0, firstTarget);
+
     SerialUSB.print(F("Profile START: step 1/"));
-    SerialUSB.print(s.profile.numSteps);
-    SerialUSB.print(F(" target="));
-    SerialUSB.print(s.profile.steps[0].targetTemp);
-    SerialUSB.print(F("F hold="));
-    SerialUSB.print(s.profile.steps[0].holdMinutes);
-    SerialUSB.print(F("min sensor="));
-    SerialUSB.print(s.profile.steps[0].sensorIndex);
-    SerialUSB.print(F(" maxPWM="));
-    SerialUSB.println(s.profile.steps[0].maxPWM);
+    SerialUSB.print(prof.numSteps);
+    SerialUSB.print(F(" assignments="));
+    SerialUSB.print(prof.steps[0].numAssignments);
+    SerialUSB.print(prof.steps[0].coolMode ? F(" COOL") : F(" HEAT"));
+    if (prof.steps[0].numAssignments > 0) {
+        SerialUSB.print(F(" target="));
+        SerialUSB.print(firstTarget);
+        SerialUSB.print(F("F"));
+    }
+    SerialUSB.println();
 }
 
 void stopProfile() {
+    if (runState != RUN_IDLE && runState != RUN_DONE) {
+        logRunStop();
+    }
     runState = RUN_IDLE;
     setSSRPWM(0);
     allOutputsOff();
@@ -111,7 +125,8 @@ int getCurrentStep() {
 }
 
 int getTotalSteps() {
-    return getSettings().profile.numSteps;
+    Settings& s = getSettings();
+    return s.profiles[s.activeProfile].numSteps;
 }
 
 unsigned long getHoldRemaining() {
@@ -129,8 +144,6 @@ static void driveOutput(int outIdx, int pwm) {
     } else {
         // Digital outputs: on if pwm > 0
         setOutput(outIdx, pwm > 0);
-        // Also mirror to SSR PWM for monitoring
-        setSSRPWM(pwm);
     }
 }
 
@@ -145,76 +158,103 @@ void updatePID() {
     lastPIDTime = now;
 
     Settings& s = getSettings();
-    ProfileStep& step = s.profile.steps[currentStep];
-    int sensorIdx = step.sensorIndex;
+    RunProfile& prof = s.profiles[s.activeProfile];
+    ProfileStep& step = prof.steps[currentStep];
 
-    // Safety: if sensor disconnected, shut down
-    if (!isSensorConnected(sensorIdx)) {
-        setSSRPWM(0);
-        return;
+    bool allTargetsMet = (step.numAssignments > 0);
+
+    for (int a = 0; a < step.numAssignments; a++) {
+        SensorAssignment& sa = step.assignments[a];
+        int sensorIdx = sa.sensorIndex;
+
+        // Safety: if sensor disconnected, shut down this output
+        if (!isSensorConnected(sensorIdx)) {
+            driveOutput(sa.outputIndex, 0);
+            allTargetsMet = false;
+            continue;
+        }
+
+        float currentTemp = getSensorTemp(sensorIdx);
+        float target      = sa.targetTemp;
+        PIDParams& pid    = s.sensorCfg[sensorIdx].pid;
+
+        // Error depends on cool/heat mode
+        float error;
+        if (step.coolMode) {
+            error = currentTemp - target;  // positive when too hot → drive cooling
+        } else {
+            error = target - currentTemp;  // positive when too cold → drive heating
+        }
+
+        // ── Proportional ──
+        float P = pid.Kp * error;
+
+        // ── Integral with anti-windup ──
+        pidIntegral[a] += error * dt;
+        float iLimit = (pid.Ki > 0.001f) ? ((float)sa.maxPWM / pid.Ki) : 1000.0f;
+        pidIntegral[a] = constrain(pidIntegral[a], -iLimit, iLimit);
+        float I = pid.Ki * pidIntegral[a];
+
+        // ── Derivative on measurement (avoids setpoint kick) ──
+        float D = 0;
+        if (!pidFirstRun[a]) {
+            float dInput = (currentTemp - pidLastInput[a]) / dt;
+            D = step.coolMode ? pid.Kd * dInput : -pid.Kd * dInput;
+        }
+        pidFirstRun[a]  = false;
+        pidLastInput[a] = currentTemp;
+
+        // ── Output ──
+        float output = P + I + D;
+        int pwm = constrain((int)output, 0, (int)sa.maxPWM);
+        driveOutput(sa.outputIndex, pwm);
+
+        // ── Check if this assignment has reached target ──
+        const float hysteresis = 2.0f;  // °F
+        if (step.coolMode) {
+            if (currentTemp > target + hysteresis) allTargetsMet = false;
+        } else {
+            if (currentTemp < target - hysteresis) allTargetsMet = false;
+        }
     }
-
-    float currentTemp = getSensorTemp(sensorIdx);
-    float target      = step.targetTemp;
-    PIDParams& pid    = s.sensorCfg[sensorIdx].pid;
-
-    float error = target - currentTemp;
-
-    // ── Proportional ──
-    float P = pid.Kp * error;
-
-    // ── Integral with anti-windup ──
-    pidIntegral += error * dt;
-    float iLimit = (pid.Ki > 0.001f) ? ((float)step.maxPWM / pid.Ki) : 1000.0f;
-    pidIntegral = constrain(pidIntegral, -iLimit, iLimit);
-    float I = pid.Ki * pidIntegral;
-
-    // ── Derivative on measurement (avoids setpoint kick) ──
-    float D = 0;
-    if (!pidFirstRun) {
-        float dInput = (currentTemp - pidLastInput) / dt;
-        D = -pid.Kd * dInput;
-    }
-    pidFirstRun  = false;
-    pidLastInput = currentTemp;
-
-    // ── Output ──
-    float output = P + I + D;
-    int pwm = constrain((int)output, 0, (int)step.maxPWM);
-    driveOutput(step.outputIndex, pwm);
 
     // ── State transitions ──
-    const float hysteresis = 2.0f;  // °F
-
     if (runState == RUN_HEATING) {
-        if (currentTemp >= target - hysteresis) {
+        if (allTargetsMet) {
             runState    = RUN_HOLDING;
             holdStartMs = now;
             holdDurationMs = (unsigned long)step.holdMinutes * 60UL * 1000UL;
+            float curTemp = step.numAssignments > 0 ?
+                getSensorTemp(step.assignments[0].sensorIndex) : 0;
+            logTargetHit(currentStep, curTemp);
             SerialUSB.print(F("Step ")); SerialUSB.print(currentStep + 1);
-            SerialUSB.println(F(": target reached, HOLDING"));
+            SerialUSB.println(F(": all targets reached, HOLDING"));
             tone(PIN_BUZZER, 2000, 200);
         }
     } else if (runState == RUN_HOLDING) {
         if (now - holdStartMs >= holdDurationMs) {
+            float curTemp = step.numAssignments > 0 ?
+                getSensorTemp(step.assignments[0].sensorIndex) : 0;
+            logHoldDone(currentStep, curTemp);
             // Check if there are more steps
-            if (currentStep < s.profile.numSteps - 1) {
+            if (currentStep < prof.numSteps - 1) {
+                allOutputsOff();
                 currentStep++;
-                pidIntegral = 0;
-                pidFirstRun = true;
+                initPID();
                 runState = RUN_HEATING;
-                holdDurationMs = (unsigned long)s.profile.steps[currentStep].holdMinutes * 60UL * 1000UL;
+                holdDurationMs = (unsigned long)prof.steps[currentStep].holdMinutes * 60UL * 1000UL;
+                float nextTarget = prof.steps[currentStep].numAssignments > 0 ?
+                    prof.steps[currentStep].assignments[0].targetTemp : 0;
+                logStepStart(currentStep, nextTarget);
                 SerialUSB.print(F("Advancing to step "));
                 SerialUSB.print(currentStep + 1);
                 SerialUSB.print(F("/"));
-                SerialUSB.print(s.profile.numSteps);
-                SerialUSB.print(F(" target="));
-                SerialUSB.print(s.profile.steps[currentStep].targetTemp);
-                SerialUSB.println(F("F"));
+                SerialUSB.println(prof.numSteps);
                 tone(PIN_BUZZER, 2000, 100);
                 delay(150);
                 tone(PIN_BUZZER, 2500, 100);
             } else {
+                logRunDone();
                 runState = RUN_DONE;
                 setSSRPWM(0);
                 allOutputsOff();
@@ -238,7 +278,10 @@ void startAutoTune(int sensorIdx) {
     Settings& s = getSettings();
     atSensor     = sensorIdx;
     atSetpoint   = getSensorTemp(sensorIdx);  // Tune around current temp
-    atDuty       = s.profile.steps[0].maxPWM / 2;
+    RunProfile& prof = s.profiles[s.activeProfile];
+    int basePWM = (prof.numSteps > 0 && prof.steps[0].numAssignments > 0) ?
+        prof.steps[0].assignments[0].maxPWM : 128;
+    atDuty       = basePWM / 2;
     if (atDuty < 30) atDuty = 30;
     atAbove      = false;
     atCrossCount = 0;

@@ -11,8 +11,18 @@
 #include "outputs.h"
 #include "pages.h"
 #include "scheduler.h"
+#include "runlog.h"
 
 static bool wifiReady = false;
+static bool staMode = false;   // true = STA (client), false = AP (hotspot)
+static bool staFailed = false; // true if last STA join attempt failed
+static char currentIP[20] = "0.0.0.0";  // Cached IP address
+
+// Forward declarations for WiFi mode helpers
+static bool wifiStartSTA(const char* ssid, const char* password);
+static void wifiStartAP();
+static void wifiPrintIPs();
+static void wifiStartServer();
 
 // ─── Low-level AT helpers ───────────────────────────────────────────────────
 
@@ -240,7 +250,7 @@ static void sendHTTPResponse(int connId, const char* contentType, const char* bo
 
 // Send a JSON response — combines header+body in ONE CIPSEND to halve AT overhead
 static void sendJSON(int connId, const char* json, int jsonLen) {
-    char buf[600];
+    static char buf[600];
     int hlen = snprintf(buf, sizeof(buf),
         "HTTP/1.1 200 OK\r\n"
         "Content-Type: application/json\r\n"
@@ -298,6 +308,24 @@ static void send404(int connId) {
     espClose(connId);
 }
 
+// ─── Float→String Helper (newlib-nano has no %f) ──────────────────────────
+// Writes float as string with 'decimals' decimal places into dst. Returns chars written.
+static int fmtFloat(char* dst, int maxLen, float v, int decimals) {
+    int neg = (v < 0);
+    if (neg) v = -v;
+    // Scale: 1 decimal → ×10, 2 → ×100, 3 → ×1000
+    long scale = 1;
+    for (int i = 0; i < decimals; i++) scale *= 10;
+    long scaled = (long)(v * scale + 0.5f);
+    long whole = scaled / scale;
+    long frac = scaled % scale;
+    if (decimals == 0)
+        return snprintf(dst, maxLen, "%s%ld", neg ? "-" : "", whole);
+    char fmt[16];
+    snprintf(fmt, sizeof(fmt), "%%s%%ld.%%0%dld", decimals);
+    return snprintf(dst, maxLen, fmt, neg ? "-" : "", whole, frac);
+}
+
 // ─── Query String Parser ───────────────────────────────────────────────────
 
 static bool getParam(const char* query, const char* key, char* val, int maxVal) {
@@ -350,8 +378,9 @@ static void urlDecode(char* dst, const char* src, int maxLen) {
 //   [16]   int8   autoTuneSensor (-1 = inactive)
 static void handleStatus(int connId) {
     Settings& s = getSettings();
+    RunProfile& prof = s.profiles[s.activeProfile];
     int cs = getCurrentStep();
-    ProfileStep& step = s.profile.steps[cs < s.profile.numSteps ? cs : 0];
+    ProfileStep& step = prof.steps[cs < prof.numSteps ? cs : 0];
 
     uint8_t bin[17];
     int16_t t0 = (int16_t)(getSensorTemp(0) * 10.0f);
@@ -372,17 +401,20 @@ static void handleStatus(int connId) {
     bin[5] = (uint8_t)getSSRPWM();
     bin[6] = (uint8_t)getRunState();
 
-    int16_t tgt = (int16_t)(step.targetTemp * 10.0f);
-    int16_t cur = (int16_t)(getSensorTemp(step.sensorIndex) * 10.0f);
+    // Use first assignment for status display
+    int16_t tgt = step.numAssignments > 0 ?
+        (int16_t)(step.assignments[0].targetTemp * 10.0f) : 0;
+    int sensorIdx = step.numAssignments > 0 ? step.assignments[0].sensorIndex : 0;
+    int16_t cur = (int16_t)(getSensorTemp(sensorIdx) * 10.0f);
     memcpy(bin + 7, &tgt, 2);
     memcpy(bin + 9, &cur, 2);
 
     uint16_t rem = (uint16_t)getHoldRemaining();
     memcpy(bin + 11, &rem, 2);
 
-    bin[13] = (uint8_t)step.maxPWM;
+    bin[13] = step.numAssignments > 0 ? step.assignments[0].maxPWM : 0;
     bin[14] = (uint8_t)cs;
-    bin[15] = (uint8_t)s.profile.numSteps;
+    bin[15] = (uint8_t)prof.numSteps;
     bin[16] = (uint8_t)((int8_t)getAutoTuneSensor());
 
     sendBinary(connId, bin, 17);
@@ -390,30 +422,19 @@ static void handleStatus(int connId) {
 
 static void handleSettingsGet(int connId) {
     Settings& s = getSettings();
-    char json[600];
-    int n = snprintf(json, sizeof(json),
-        "{\"ssid\":\"%s\","
-        "\"sc\":[{\"kp\":%.2f,\"ki\":%.3f,\"kd\":%.2f,\"out\":%d},"
-        "{\"kp\":%.2f,\"ki\":%.3f,\"kd\":%.2f,\"out\":%d}],"
-        "\"prof\":{\"n\":%d,\"steps\":[",
-        s.wifi.ssid,
-        s.sensorCfg[0].pid.Kp, s.sensorCfg[0].pid.Ki, s.sensorCfg[0].pid.Kd,
-        s.sensorCfg[0].outputIndex,
-        s.sensorCfg[1].pid.Kp, s.sensorCfg[1].pid.Ki, s.sensorCfg[1].pid.Kd,
-        s.sensorCfg[1].outputIndex,
-        s.profile.numSteps
-    );
-    for (int i = 0; i < s.profile.numSteps && i < MAX_PROFILE_STEPS; i++) {
-        if (i > 0 && n < (int)sizeof(json) - 60) json[n++] = ',';
-        n += snprintf(json + n, sizeof(json) - n,
-            "{\"target\":%.1f,\"hold\":%d,\"sensor\":%d,\"maxpwm\":%d,\"out\":%d}",
-            s.profile.steps[i].targetTemp,
-            s.profile.steps[i].holdMinutes,
-            s.profile.steps[i].sensorIndex,
-            s.profile.steps[i].maxPWM,
-            s.profile.steps[i].outputIndex);
+    char json[300];
+    int n = snprintf(json, sizeof(json), "{\"ssid\":\"%s\",\"sc\":[", s.wifi.ssid);
+    for (int i = 0; i < 2; i++) {
+        if (i > 0) json[n++] = ',';
+        n += snprintf(json + n, sizeof(json) - n, "{\"kp\":");
+        n += fmtFloat(json + n, sizeof(json) - n, s.sensorCfg[i].pid.Kp, 2);
+        n += snprintf(json + n, sizeof(json) - n, ",\"ki\":");
+        n += fmtFloat(json + n, sizeof(json) - n, s.sensorCfg[i].pid.Ki, 3);
+        n += snprintf(json + n, sizeof(json) - n, ",\"kd\":");
+        n += fmtFloat(json + n, sizeof(json) - n, s.sensorCfg[i].pid.Kd, 2);
+        n += snprintf(json + n, sizeof(json) - n, ",\"out\":%d}", s.sensorCfg[i].outputIndex);
     }
-    n += snprintf(json + n, sizeof(json) - n, "]}}");
+    n += snprintf(json + n, sizeof(json) - n, "]}");
     sendJSON(connId, json, n);
 }
 
@@ -454,20 +475,18 @@ static void handleWifiSave(int connId, const char* query) {
     SerialUSB.print(F("[web] WiFi saved: ")); SerialUSB.println(s.wifi.ssid);
     sendOK(connId);
 
-    // Try to join the network
+    if (!s.wifi.configured) return;
+
+    // Try to switch to STA mode
     delay(500);
-    char cmd[128];
-    snprintf(cmd, sizeof(cmd), "AT+CWJAP_CUR=\"%s\",\"%s\"", s.wifi.ssid, s.wifi.password);
-    if (espCmd(cmd, 15000)) {
-        SerialUSB.println(F("[wifi] Connected to AP!"));
-        // Read new IP
-        char resp[256];
-        if (espCmdResp("AT+CIFSR", resp, sizeof(resp), 3000)) {
-            SerialUSB.print(F("[wifi] ")); SerialUSB.print(resp);
-        }
+    if (wifiStartSTA(s.wifi.ssid, s.wifi.password)) {
+        staMode = true;
     } else {
-        SerialUSB.println(F("[wifi] Failed to join AP"));
+        staMode = false;
+        wifiStartAP();
     }
+    wifiStartServer();
+    wifiPrintIPs();
 }
 
 static void handlePIDSave(int connId, const char* query) {
@@ -494,69 +513,147 @@ static void handlePIDSave(int connId, const char* query) {
     sendOK(connId);
 }
 
-static void handleProfileSave(int connId, const char* query) {
+// ─── Profile API Handlers ───────────────────────────────────────────────────
+
+// GET /api/profiles → summary of all profiles
+static void handleProfilesGet(int connId) {
+    Settings& s = getSettings();
+    char json[256];
+    int n = snprintf(json, sizeof(json), "{\"ap\":%d,\"p\":[", s.activeProfile);
+    for (int i = 0; i < MAX_PROFILES; i++) {
+        if (i > 0) json[n++] = ',';
+        n += snprintf(json + n, sizeof(json) - n,
+            "{\"name\":\"%s\",\"n\":%d}",
+            s.profiles[i].name, s.profiles[i].numSteps);
+    }
+    n += snprintf(json + n, sizeof(json) - n, "]}");
+    sendJSON(connId, json, n);
+}
+
+// GET /api/profile/get?p=0 → full detail of one profile
+static void handleProfileGetOne(int connId, const char* query) {
+    Settings& s = getSettings();
+    char val[8];
+    int p = 0;
+    if (getParam(query, "p", val, sizeof(val))) p = atoi(val);
+    if (p < 0 || p >= MAX_PROFILES) p = 0;
+
+    RunProfile& prof = s.profiles[p];
+
+    // Build complete JSON in buffer (max ~1100 bytes for 10 steps × 2 assignments)
+    static char json[1300];
+    int n = snprintf(json, sizeof(json),
+        "{\"name\":\"%s\",\"n\":%d,\"steps\":[", prof.name, prof.numSteps);
+
+    for (int si = 0; si < prof.numSteps; si++) {
+        ProfileStep& st = prof.steps[si];
+        if (si > 0) json[n++] = ',';
+        n += snprintf(json + n, sizeof(json) - n,
+            "{\"hold\":%d,\"cool\":%d,\"na\":%d,\"a\":[",
+            st.holdMinutes, st.coolMode ? 1 : 0, st.numAssignments);
+        for (int ai = 0; ai < st.numAssignments; ai++) {
+            SensorAssignment& a = st.assignments[ai];
+            if (ai > 0) json[n++] = ',';
+            n += snprintf(json + n, sizeof(json) - n,
+                "{\"s\":%d,\"o\":%d,\"m\":%d,\"t\":",
+                a.sensorIndex, a.outputIndex, a.maxPWM);
+            n += fmtFloat(json + n, sizeof(json) - n, a.targetTemp, 1);
+            json[n++] = '}';
+        }
+        n += snprintf(json + n, sizeof(json) - n, "]}");
+    }
+    n += snprintf(json + n, sizeof(json) - n, "]}");
+
+    sendJSON(connId, json, n);
+}
+
+// GET /api/profile/select?p=0 → set active profile
+static void handleProfileSelect(int connId, const char* query) {
+    Settings& s = getSettings();
+    char val[8];
+    int p = 0;
+    if (getParam(query, "p", val, sizeof(val))) p = atoi(val);
+    if (p >= 0 && p < MAX_PROFILES) {
+        s.activeProfile = p;
+        saveSettings();
+        SerialUSB.print(F("[web] Active profile = ")); SerialUSB.println(p);
+    }
+    sendOK(connId);
+}
+
+// GET /api/profile/name?p=0&name=... → set profile name
+static void handleProfileName(int connId, const char* query) {
+    Settings& s = getSettings();
+    char val[8], raw[20];
+    int p = 0;
+    if (getParam(query, "p", val, sizeof(val))) p = atoi(val);
+    if (p < 0 || p >= MAX_PROFILES) p = 0;
+    if (getParam(query, "name", raw, sizeof(raw))) {
+        urlDecode(s.profiles[p].name, raw, sizeof(s.profiles[p].name));
+    }
+    saveSettings();
+    sendOK(connId);
+}
+
+// GET /api/profile/resize?p=0&n=3 → set number of steps
+static void handleProfileResize(int connId, const char* query) {
+    Settings& s = getSettings();
+    char val[8];
+    int p = 0, n = 0;
+    if (getParam(query, "p", val, sizeof(val))) p = atoi(val);
+    if (getParam(query, "n", val, sizeof(val))) n = atoi(val);
+    if (p < 0 || p >= MAX_PROFILES) p = 0;
+    if (n < 0) n = 0;
+    if (n > MAX_PROFILE_STEPS) n = MAX_PROFILE_STEPS;
+    // Initialize new steps if growing
+    for (int i = s.profiles[p].numSteps; i < n; i++) {
+        memset(&s.profiles[p].steps[i], 0, sizeof(ProfileStep));
+        s.profiles[p].steps[i].holdMinutes = 60;
+    }
+    s.profiles[p].numSteps = n;
+    saveSettings();
+    sendOK(connId);
+}
+
+// GET /api/profile/step?p=0&s=0&hold=60&cool=0&na=1&s0=0&o0=0&m0=255&t0=175.0
+static void handleProfileStepSave(int connId, const char* query) {
     Settings& s = getSettings();
     char val[16];
-    int idx = 0;
+    int p = 0, si = 0;
+    if (getParam(query, "p", val, sizeof(val))) p = atoi(val);
+    if (getParam(query, "s", val, sizeof(val))) si = atoi(val);
+    if (p < 0 || p >= MAX_PROFILES) p = 0;
+    if (si < 0 || si >= s.profiles[p].numSteps) { sendOK(connId); return; }
 
-    if (getParam(query, "step", val, sizeof(val))) idx = atoi(val);
-    if (idx < 0 || idx >= s.profile.numSteps) idx = 0;
-
-    ProfileStep& step = s.profile.steps[idx];
-    if (getParam(query, "target", val, sizeof(val))) step.targetTemp = atof(val);
-    if (getParam(query, "hold", val, sizeof(val)))   step.holdMinutes = atoi(val);
-    if (getParam(query, "sensor", val, sizeof(val))) step.sensorIndex = atoi(val);
-    if (getParam(query, "maxpwm", val, sizeof(val))) step.maxPWM = atoi(val);
-    if (getParam(query, "out", val, sizeof(val))) {
-        int o = atoi(val);
-        if (o >= 0 && o < NUM_OUTPUTS) step.outputIndex = o;
+    ProfileStep& step = s.profiles[p].steps[si];
+    if (getParam(query, "hold", val, sizeof(val))) step.holdMinutes = atoi(val);
+    if (getParam(query, "cool", val, sizeof(val))) step.coolMode = (atoi(val) != 0);
+    if (getParam(query, "na", val, sizeof(val))) {
+        int na = atoi(val);
+        if (na < 0) na = 0;
+        if (na > MAX_ASSIGNMENTS_PER_STEP) na = MAX_ASSIGNMENTS_PER_STEP;
+        step.numAssignments = na;
     }
+
+    // Parse assignments: s0, o0, m0, t0, s1, o1, m1, t1
+    for (int ai = 0; ai < step.numAssignments; ai++) {
+        char key[8];
+        snprintf(key, sizeof(key), "s%d", ai);
+        if (getParam(query, key, val, sizeof(val))) step.assignments[ai].sensorIndex = atoi(val);
+        snprintf(key, sizeof(key), "o%d", ai);
+        if (getParam(query, key, val, sizeof(val))) step.assignments[ai].outputIndex = atoi(val);
+        snprintf(key, sizeof(key), "m%d", ai);
+        if (getParam(query, key, val, sizeof(val))) step.assignments[ai].maxPWM = atoi(val);
+        snprintf(key, sizeof(key), "t%d", ai);
+        if (getParam(query, key, val, sizeof(val))) step.assignments[ai].targetTemp = atof(val);
+    }
+
     saveSettings();
-
-    SerialUSB.print(F("[web] Step ")); SerialUSB.print(idx + 1);
-    SerialUSB.print(F(": target=")); SerialUSB.print(step.targetTemp);
-    SerialUSB.print(F("°F hold=")); SerialUSB.print(step.holdMinutes);
-    SerialUSB.print(F("min sensor=")); SerialUSB.print(step.sensorIndex);
-    SerialUSB.print(F(" out=")); SerialUSB.print(step.outputIndex);
-    SerialUSB.print(F(" maxPWM=")); SerialUSB.println(step.maxPWM);
-    sendOK(connId);
-}
-
-static void handleProfileAdd(int connId) {
-    Settings& s = getSettings();
-    if (s.profile.numSteps >= MAX_PROFILE_STEPS) {
-        sendOK(connId);
-        return;
-    }
-    int n = s.profile.numSteps;
-    // Copy from last step as template
-    s.profile.steps[n] = s.profile.steps[n > 0 ? n - 1 : 0];
-    s.profile.numSteps++;
-    saveSettings();
-    SerialUSB.print(F("[web] Added step ")); SerialUSB.println(s.profile.numSteps);
-    sendOK(connId);
-}
-
-static void handleProfileDel(int connId, const char* query) {
-    Settings& s = getSettings();
-    if (s.profile.numSteps <= 1) {
-        sendOK(connId);
-        return;
-    }
-    char val[8];
-    int idx = s.profile.numSteps - 1;
-    if (getParam(query, "step", val, sizeof(val))) idx = atoi(val);
-    if (idx < 0 || idx >= s.profile.numSteps) {
-        sendOK(connId);
-        return;
-    }
-    // Shift remaining steps down
-    for (int i = idx; i < s.profile.numSteps - 1; i++) {
-        s.profile.steps[i] = s.profile.steps[i + 1];
-    }
-    s.profile.numSteps--;
-    saveSettings();
-    SerialUSB.print(F("[web] Removed step, now ")); SerialUSB.println(s.profile.numSteps);
+    SerialUSB.print(F("[web] Profile ")); SerialUSB.print(p);
+    SerialUSB.print(F(" step ")); SerialUSB.print(si);
+    SerialUSB.print(F(": na=")); SerialUSB.print(step.numAssignments);
+    SerialUSB.print(step.coolMode ? F(" COOL") : F(" HEAT"));
+    SerialUSB.print(F(" hold=")); SerialUSB.println(step.holdMinutes);
     sendOK(connId);
 }
 
@@ -568,6 +665,186 @@ static void handleStart(int connId) {
 static void handleStop(int connId) {
     stopProfile();
     sendOK(connId);
+}
+
+// ─── Run Log Handlers ──────────────────────────────────────────────────────
+
+static const char* logEventName(LogEventType t) {
+    switch (t) {
+        case LOG_RUN_START:   return "RUN_START";
+        case LOG_RUN_STOP:    return "RUN_STOP";
+        case LOG_RUN_DONE:    return "RUN_DONE";
+        case LOG_STEP_START:  return "STEP_START";
+        case LOG_TARGET_HIT:  return "TARGET_HIT";
+        case LOG_HOLD_DONE:   return "HOLD_DONE";
+        case LOG_TEMP_CHANGE: return "TEMP";
+        case LOG_ESTOP:       return "ESTOP";
+        default:              return "?";
+    }
+}
+
+// GET /api/log?which=active|last  → JSON summary + entries
+static void handleLogGet(int connId, const char* query) {
+    char which[8] = "active";
+    getParam(query, "which", which, sizeof(which));
+
+    const LogEntry* entries;
+    uint16_t count = 0;
+    RunLogHeader hdr;
+
+    bool isActive = (strcmp(which, "last") != 0);
+    if (isActive) {
+        entries = getActiveEntries(count);
+        hdr = getActiveRunHeader();
+    } else {
+        if (!hasLastRun()) {
+            const char* j = "{\"ok\":false,\"msg\":\"No saved run\"}";
+            sendJSON(connId, j, strlen(j));
+            return;
+        }
+        entries = getLastRunEntries(count);
+        hdr = getLastRunHeader();
+    }
+
+    // Build JSON: {"ok":true,"logging":T/F,"dur":N,"steps":N,"count":N,"entries":[...]}
+    // We'll build it in chunks since it can be large
+    char buf[512];
+    int pos = snprintf(buf, sizeof(buf),
+        "{\"ok\":true,\"logging\":%s,\"dur\":%lu,\"steps\":%d,\"count\":%d,\"entries\":[",
+        isLogging() ? "true" : "false",
+        (unsigned long)hdr.durationSec,
+        hdr.numSteps,
+        count);
+
+    // Calculate total content length first
+    // Each entry: {"t":N,"e":"NAME","x":N,"v":NNN.N},  ~40 chars max
+    // We'll estimate and use chunked sending instead
+    // Actually, let's just stream the whole response
+
+    // First, build all entries into a big buffer
+    // With 500 entries × ~40 chars = ~20KB — too big for RAM
+    // Instead, send header without Content-Length and close after
+
+    // Send HTTP header (no content-length, connection: close)
+    char httpHdr[128];
+    int hLen = snprintf(httpHdr, sizeof(httpHdr),
+        "HTTP/1.1 200 OK\r\n"
+        "Content-Type: application/json\r\n"
+        "Connection: close\r\n\r\n");
+    espSendChunk(connId, httpHdr, hLen);
+
+    // Send JSON opening
+    espSendChunk(connId, buf, pos);
+
+    // Send entries in batches — pack multiple entries into a buffer
+    char batch[512];
+    int bp = 0;
+    for (uint16_t i = 0; i < count; i++) {
+        bp += snprintf(batch + bp, sizeof(batch) - bp,
+            "%s{\"t\":%u,\"e\":%d,\"x\":%d,\"v\":",
+            i > 0 ? "," : "",
+            entries[i].secOffset,
+            (int)entries[i].type,
+            entries[i].extra);
+        bp += fmtFloat(batch + bp, sizeof(batch) - bp, entries[i].value, 1);
+        batch[bp++] = '}';
+        // Flush when buffer is getting full, or last entry
+        if (bp > 400 || i == count - 1) {
+            if (!espSendChunk(connId, batch, bp)) goto logDone;
+            bp = 0;
+            yieldCritical();
+        }
+    }
+
+    // Close JSON
+    espSendChunk(connId, "]}", 2);
+logDone:
+    espClose(connId);
+    ipdState = S_IDLE;
+}
+
+// GET /api/log/csv?which=active|last  → CSV download
+static void handleLogCSV(int connId, const char* query) {
+    char which[8] = "active";
+    getParam(query, "which", which, sizeof(which));
+
+    const LogEntry* entries;
+    uint16_t count = 0;
+
+    bool isActive = (strcmp(which, "last") != 0);
+    if (isActive) {
+        entries = getActiveEntries(count);
+    } else {
+        if (!hasLastRun()) {
+            send404(connId);
+            return;
+        }
+        entries = getLastRunEntries(count);
+    }
+
+    // Send HTTP header for CSV download
+    char httpHdr[196];
+    int hLen = snprintf(httpHdr, sizeof(httpHdr),
+        "HTTP/1.1 200 OK\r\n"
+        "Content-Type: text/csv\r\n"
+        "Content-Disposition: attachment; filename=\"runlog.csv\"\r\n"
+        "Connection: close\r\n\r\n");
+    espSendChunk(connId, httpHdr, hLen);
+
+    // CSV header
+    const char* csvHdr = "Time(s),Event,Sensor/Step,Value\r\n";
+    espSendChunk(connId, csvHdr, strlen(csvHdr));
+
+    // CSV rows — batch into buffer
+    char batch[512];
+    int bp = 0;
+    for (uint16_t i = 0; i < count; i++) {
+        int len = snprintf(batch + bp, sizeof(batch) - bp,
+            "%u,%s,%d,",
+            entries[i].secOffset,
+            logEventName(entries[i].type),
+            entries[i].extra);
+        bp += len;
+        bp += fmtFloat(batch + bp, sizeof(batch) - bp, entries[i].value, 1);
+        len = snprintf(batch + bp, sizeof(batch) - bp, "\r\n");
+        bp += len;
+        if (bp > 400 || i == count - 1) {
+            if (!espSendChunk(connId, batch, bp)) break;
+            bp = 0;
+            yieldCritical();
+        }
+    }
+
+    espClose(connId);
+    ipdState = S_IDLE;
+}
+
+// GET /api/log/recent → last 15 entries of active run (compact JSON for dashboard)
+static void handleLogRecent(int connId) {
+    uint16_t count = 0;
+    const LogEntry* entries = getActiveEntries(count);
+
+    // Get last 15 entries
+    int start = (count > 15) ? count - 15 : 0;
+    int n = count - start;
+
+    char buf[512];
+    int pos = snprintf(buf, sizeof(buf), "{\"ok\":true,\"entries\":[");
+
+    for (int i = start; i < (int)count; i++) {
+        if (pos > (int)sizeof(buf) - 60) break;  // Safety
+        pos += snprintf(buf + pos, sizeof(buf) - pos,
+            "%s{\"t\":%u,\"e\":%d,\"x\":%d,\"v\":",
+            i > start ? "," : "",
+            entries[i].secOffset,
+            (int)entries[i].type,
+            entries[i].extra);
+        pos += fmtFloat(buf + pos, sizeof(buf) - pos, entries[i].value, 1);
+        buf[pos++] = '}';
+    }
+    pos += snprintf(buf + pos, sizeof(buf) - pos, "]}");
+
+    sendJSON(connId, buf, pos);
 }
 
 // ─── WiFi Scan Handler ─────────────────────────────────────────────────────
@@ -734,6 +1011,12 @@ static void handleHTTPRequest(int connId, const char* data, int len) {
     else if (strcmp(path, "/settings") == 0) {
         sendHTTPResponse(connId, "text/html", PAGE_SETTINGS, strlen(PAGE_SETTINGS), 300);
     }
+    else if (strcmp(path, "/profiles") == 0) {
+        sendHTTPResponse(connId, "text/html", PAGE_PROFILES, strlen(PAGE_PROFILES), 300);
+    }
+    else if (strcmp(path, "/log") == 0) {
+        sendHTTPResponse(connId, "text/html", PAGE_LOG, strlen(PAGE_LOG), 300);
+    }
     else if (strcmp(path, "/api/status") == 0) {
         handleStatus(connId);
     }
@@ -752,14 +1035,23 @@ static void handleHTTPRequest(int connId, const char* data, int len) {
     else if (strcmp(path, "/api/pid") == 0) {
         handlePIDSave(connId, query);
     }
-    else if (strcmp(path, "/api/profile") == 0) {
-        handleProfileSave(connId, query);
+    else if (strcmp(path, "/api/profiles") == 0) {
+        handleProfilesGet(connId);
     }
-    else if (strcmp(path, "/api/profile/add") == 0) {
-        handleProfileAdd(connId);
+    else if (strcmp(path, "/api/profile/get") == 0) {
+        handleProfileGetOne(connId, query);
     }
-    else if (strcmp(path, "/api/profile/del") == 0) {
-        handleProfileDel(connId, query);
+    else if (strcmp(path, "/api/profile/select") == 0) {
+        handleProfileSelect(connId, query);
+    }
+    else if (strcmp(path, "/api/profile/name") == 0) {
+        handleProfileName(connId, query);
+    }
+    else if (strcmp(path, "/api/profile/resize") == 0) {
+        handleProfileResize(connId, query);
+    }
+    else if (strcmp(path, "/api/profile/step") == 0) {
+        handleProfileStepSave(connId, query);
     }
     else if (strcmp(path, "/api/start") == 0) {
         handleStart(connId);
@@ -772,6 +1064,15 @@ static void handleHTTPRequest(int connId, const char* data, int len) {
     }
     else if (strcmp(path, "/api/autotune") == 0) {
         handleAutoTune(connId, query);
+    }
+    else if (strcmp(path, "/api/log") == 0) {
+        handleLogGet(connId, query);
+    }
+    else if (strcmp(path, "/api/log/csv") == 0) {
+        handleLogCSV(connId, query);
+    }
+    else if (strcmp(path, "/api/log/recent") == 0) {
+        handleLogRecent(connId);
     }
     else {
         send404(connId);
@@ -837,10 +1138,159 @@ static void processESPByte(char c) {
     }
 }
 
+// ─── WiFi Mode Helpers ──────────────────────────────────────────────────────
+
+// Start as WiFi client — returns true if connected
+static bool wifiStartSTA(const char* ssid, const char* password) {
+    SerialUSB.print(F("[wifi] STA mode — joining: ")); SerialUSB.println(ssid);
+    espCmd("AT+CWMODE_DEF=1", 2000);   // Pure station mode (saved to ESP flash)
+    delay(200);
+
+    char cmd[128];
+    snprintf(cmd, sizeof(cmd), "AT+CWJAP_DEF=\"%s\",\"%s\"", ssid, password);
+    if (espCmd(cmd, 15000)) {
+        SerialUSB.println(F("[wifi] STA connected!"));
+        staFailed = false;
+        return true;
+    }
+    SerialUSB.println(F("[wifi] STA join failed"));
+    staFailed = true;
+    return false;
+}
+
+// Start as WiFi hotspot
+static void wifiStartAP() {
+    SerialUSB.println(F("[wifi] AP mode — creating hotspot"));
+    espCmd("AT+CWMODE_DEF=2", 2000);   // Pure AP mode (saved to ESP flash)
+    delay(200);
+    espCmd("AT+CWSAP_DEF=\"SmartPID-Still\",\"\",5,0,4,0", 3000);
+    strncpy(currentIP, "192.168.4.1", sizeof(currentIP));
+}
+
+// Print current IP addresses to serial and cache the active IP
+static void wifiPrintIPs() {
+    char resp[256];
+    if (espCmdResp("AT+CIFSR", resp, sizeof(resp), 3000)) {
+        char* line = strtok(resp, "\n");
+        while (line) {
+            if (strstr(line, "CIFSR")) {
+                SerialUSB.print(F("[wifi] ")); SerialUSB.println(line);
+                // Extract IP from +CIFSR:STAIP,"x.x.x.x" or +CIFSR:APIP,"x.x.x.x"
+                const char* tag = staMode ? "STAIP" : "APIP";
+                if (strstr(line, tag)) {
+                    char* q1 = strchr(line, '"');
+                    if (q1) {
+                        q1++;
+                        char* q2 = strchr(q1, '"');
+                        if (q2) {
+                            int len = q2 - q1;
+                            if (len > 0 && len < (int)sizeof(currentIP)) {
+                                memcpy(currentIP, q1, len);
+                                currentIP[len] = '\0';
+                            }
+                        }
+                    }
+                }
+            }
+            line = strtok(NULL, "\n");
+        }
+    }
+}
+
+// Start (or restart) the TCP server
+static void wifiStartServer() {
+    espCmd("AT+CIPSERVER=0", 2000);    // Stop any existing server
+    delay(100);
+    espCmd("AT+CIPMUX=1", 2000);       // Multi-connection mode
+    if (espCmd("AT+CIPSERVER=1,80", 3000)) {
+        SerialUSB.println(F("[wifi] HTTP server started on port 80"));
+        wifiReady = true;
+    } else {
+        SerialUSB.println(F("[wifi] Failed to start server!"));
+    }
+}
+
+// Check STA connectivity — called periodically
+void wifiCheckConnection() {
+    if (!wifiReady) return;
+    Settings& s = getSettings();
+
+    if (staMode) {
+        // In STA mode — verify we're still connected
+        char resp[128];
+        if (espCmdResp("AT+CIPSTATUS", resp, sizeof(resp), 2000)) {
+            // STATUS:5 means "not connected to AP"
+            if (strstr(resp, "STATUS:5")) {
+                SerialUSB.println(F("[wifi] STA connection lost — switching to AP"));
+                staMode = false;
+                wifiStartAP();
+                wifiStartServer();
+                wifiPrintIPs();
+            }
+        }
+    } else {
+        // In AP mode — try to reconnect if we have credentials
+        // (either in Settings or stored on ESP flash via _DEF)
+        if (s.wifi.configured && strlen(s.wifi.ssid) > 0) {
+            SerialUSB.println(F("[wifi] Retrying STA connection..."));
+            if (wifiStartSTA(s.wifi.ssid, s.wifi.password)) {
+                staMode = true;
+                wifiStartServer();
+                wifiPrintIPs();
+            }
+        } else {
+            // Settings cleared by reflash — check if ESP has stored credentials
+            // by trying AT+CWJAP_DEF (switch to STA and use saved creds)
+            SerialUSB.println(F("[wifi] Trying ESP stored credentials..."));
+            espCmd("AT+CWMODE_DEF=1", 2000);
+            delay(3000); // give ESP time to auto-connect
+            char cwjap[128];
+            if (espCmdResp("AT+CWJAP?", cwjap, sizeof(cwjap), 3000)) {
+                char* p = strstr(cwjap, "+CWJAP:\"");
+                if (p) {
+                    p += 8;
+                    char* q = strchr(p, '"');
+                    if (q && q > p) {
+                        int len = q - p;
+                        if (len < (int)sizeof(s.wifi.ssid)) {
+                            memcpy(s.wifi.ssid, p, len);
+                            s.wifi.ssid[len] = '\0';
+                            s.wifi.configured = true;
+                            SerialUSB.print(F("[wifi] Reconnected via ESP creds: "));
+                            SerialUSB.println(s.wifi.ssid);
+                            staMode = true;
+                            staFailed = false;
+                            wifiStartServer();
+                            wifiPrintIPs();
+                            return;
+                        }
+                    }
+                }
+            }
+            // ESP stored creds didn't work — go back to AP
+            wifiStartAP();
+            wifiStartServer();
+            wifiPrintIPs();
+        }
+    }
+}
+
 // ─── Public API ─────────────────────────────────────────────────────────────
 
 bool isWiFiReady() {
     return wifiReady;
+}
+
+bool isWiFiSTA() {
+    return staMode;
+}
+
+bool isWiFiSTAFailed() {
+    return staFailed;
+}
+
+const char* getWiFiIP() {
+    return currentIP;
 }
 
 // Time-budgeted WiFi poll — process available serial data but limit
@@ -905,55 +1355,41 @@ void initWiFi() {
     // Disable echo
     espCmd("ATE0", 1000);
 
-    // Check for saved WiFi credentials
+    // Try to connect as STA (client), fall back to AP (hotspot)
     Settings& s = getSettings();
+    staMode = false;
 
-    if (s.wifi.configured && strlen(s.wifi.ssid) > 0) {
-        // Station + AP mode (join home network, keep AP as fallback)
-        SerialUSB.println(F("[wifi] Credentials found, STA+AP mode"));
-        espCmd("AT+CWMODE_CUR=3", 2000);
-
-        // Configure our AP (open, no password)
-        espCmd("AT+CWSAP_CUR=\"SmartPID-Still\",\"\",5,0,4,0", 3000);
-
-        // Join the saved network
-        char cmd[128];
-        snprintf(cmd, sizeof(cmd), "AT+CWJAP_CUR=\"%s\",\"%s\"",
-                 s.wifi.ssid, s.wifi.password);
-        SerialUSB.print(F("[wifi] Joining: ")); SerialUSB.println(s.wifi.ssid);
-        if (espCmd(cmd, 15000)) {
-            SerialUSB.println(F("[wifi] Connected to home network!"));
-        } else {
-            SerialUSB.println(F("[wifi] Could not join — AP-only fallback"));
-        }
-    } else {
-        // AP-only mode
-        SerialUSB.println(F("[wifi] No credentials, AP-only mode"));
-        espCmd("AT+CWMODE_CUR=2", 2000);
-        espCmd("AT+CWSAP_CUR=\"SmartPID-Still\",\"\",5,0,4,0", 3000);
-    }
-
-    // Print IP addresses
-    char resp[256];
-    if (espCmdResp("AT+CIFSR", resp, sizeof(resp), 3000)) {
-        // Extract and print IPs
-        char* line = strtok(resp, "\n");
-        while (line) {
-            if (strstr(line, "CIFSR")) {
-                SerialUSB.print(F("[wifi] ")); SerialUSB.println(line);
+    // Check if ESP already connected (credentials saved in ESP flash via _DEF)
+    char cwjap[128];
+    if (espCmdResp("AT+CWJAP?", cwjap, sizeof(cwjap), 3000)) {
+        // Response like: +CWJAP:"MyNetwork","aa:bb:cc:dd:ee:ff",6,-50\r\nOK
+        char* p = strstr(cwjap, "+CWJAP:\"");
+        if (p) {
+            p += 8; // skip '+CWJAP:"'
+            char* q = strchr(p, '"');
+            if (q && q > p) {
+                int len = q - p;
+                if (len < (int)sizeof(s.wifi.ssid)) {
+                    memcpy(s.wifi.ssid, p, len);
+                    s.wifi.ssid[len] = '\0';
+                    s.wifi.configured = true;
+                    SerialUSB.print(F("[wifi] ESP already connected to: "));
+                    SerialUSB.println(s.wifi.ssid);
+                    staMode = true;
+                    staFailed = false;
+                }
             }
-            line = strtok(NULL, "\n");
         }
     }
 
-    // Enable multiple connections (required for server mode)
-    espCmd("AT+CIPMUX=1", 2000);
-
-    // Start TCP server on port 80
-    if (espCmd("AT+CIPSERVER=1,80", 3000)) {
-        SerialUSB.println(F("[wifi] HTTP server started on port 80"));
-        wifiReady = true;
-    } else {
-        SerialUSB.println(F("[wifi] Failed to start server!"));
+    // If ESP wasn't already connected, try with Settings credentials
+    if (!staMode && s.wifi.configured && strlen(s.wifi.ssid) > 0) {
+        staMode = wifiStartSTA(s.wifi.ssid, s.wifi.password);
     }
+    if (!staMode) {
+        wifiStartAP();
+    }
+
+    wifiPrintIPs();
+    wifiStartServer();
 }

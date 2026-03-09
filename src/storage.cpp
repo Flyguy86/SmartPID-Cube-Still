@@ -8,7 +8,7 @@ static Settings current;
 void loadSettings() {
     current = flash_store.read();
     if (current.magic != SETTINGS_MAGIC) {
-        // First boot — initialize defaults
+        // First boot or struct changed — initialize defaults
         memset(&current, 0, sizeof(current));
         current.magic = SETTINGS_MAGIC;
 
@@ -19,13 +19,25 @@ void loadSettings() {
         current.sensorCfg[0] = { {2.0f, 0.05f, 1.0f}, 0 }; // Lower → SSR
         current.sensorCfg[1] = { {2.0f, 0.05f, 1.0f}, 0 }; // Upper → SSR
 
-        // Run profile defaults (1 step)
-        current.profile.numSteps = 1;
-        current.profile.steps[0].targetTemp  = 175.0f;   // °F (typical distillation)
-        current.profile.steps[0].holdMinutes = 60;
-        current.profile.steps[0].sensorIndex = 0;         // Lower probe
-        current.profile.steps[0].maxPWM      = 255;
-        current.profile.steps[0].outputIndex = OUT_SSR;   // SSR output
+        // Active profile
+        current.activeProfile = 0;
+
+        // Profile 0: "Default" with one step, one sensor assignment
+        strncpy(current.profiles[0].name, "Default", sizeof(current.profiles[0].name));
+        current.profiles[0].numSteps = 1;
+        current.profiles[0].steps[0].numAssignments = 1;
+        current.profiles[0].steps[0].coolMode = false;
+        current.profiles[0].steps[0].holdMinutes = 60;
+        current.profiles[0].steps[0].assignments[0].sensorIndex = 0;     // Lower probe
+        current.profiles[0].steps[0].assignments[0].outputIndex = OUT_SSR;
+        current.profiles[0].steps[0].assignments[0].maxPWM      = 255;
+        current.profiles[0].steps[0].assignments[0].targetTemp   = 175.0f;
+
+        // Profiles 1 and 2: empty
+        strncpy(current.profiles[1].name, "Profile 2", sizeof(current.profiles[1].name));
+        current.profiles[1].numSteps = 0;
+        strncpy(current.profiles[2].name, "Profile 3", sizeof(current.profiles[2].name));
+        current.profiles[2].numSteps = 0;
 
         saveSettings();
     }

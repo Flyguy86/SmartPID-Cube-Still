@@ -20,6 +20,7 @@
 #include "scheduler.h"
 #include "buttons.h"
 #include "display.h"
+#include "runlog.h"
 
 // ─── Button + Display task wrapper ──────────────────────────────────────────
 // Polls buttons and feeds events to display/menu handler.
@@ -87,16 +88,21 @@ void setup() {
     Settings& s = getSettings();
     SerialUSB.print(F("WiFi: "));
     SerialUSB.println(s.wifi.configured ? s.wifi.ssid : "(not configured)");
-    SerialUSB.print(F("Profile: "));
-    SerialUSB.print(s.profile.numSteps);
-    SerialUSB.print(F(" steps, step1: target="));
-    SerialUSB.print(s.profile.steps[0].targetTemp, 1);
-    SerialUSB.print(F("F hold="));
-    SerialUSB.print(s.profile.steps[0].holdMinutes);
-    SerialUSB.print(F("min sensor="));
-    SerialUSB.print(s.profile.steps[0].sensorIndex);
-    SerialUSB.print(F(" maxPWM="));
-    SerialUSB.println(s.profile.steps[0].maxPWM);
+    RunProfile& prof = s.profiles[s.activeProfile];
+    SerialUSB.print(F("Profile "));
+    SerialUSB.print(s.activeProfile);
+    SerialUSB.print(F(" \""));
+    SerialUSB.print(prof.name);
+    SerialUSB.print(F("\": "));
+    SerialUSB.print(prof.numSteps);
+    SerialUSB.print(F(" steps"));
+    if (prof.numSteps > 0 && prof.steps[0].numAssignments > 0) {
+        SerialUSB.print(F(", step1: target="));
+        SerialUSB.print(prof.steps[0].assignments[0].targetTemp, 1);
+        SerialUSB.print(F("F maxPWM="));
+        SerialUSB.print(prof.steps[0].assignments[0].maxPWM);
+    }
+    SerialUSB.println();
     SerialUSB.println();
 
     // Initialize subsystems
@@ -105,6 +111,7 @@ void setup() {
     initPID();
     initButtons();
     initDisplay();          // Show splash immediately
+    initRunLog();
     initWiFi();
 
     // ── Register tasks with priority scheduler ──────────────────────────────
@@ -128,8 +135,10 @@ void setup() {
     schedulerAddTask(debugPrint,     PRIORITY_LOW,      5000, 0, "Debug");
     schedulerAddTask(schedulerPrintStats, PRIORITY_LOW, 30000, 0, "Stats");
     schedulerAddTask(rescanSensors,  PRIORITY_LOW,      5000, 0, "Rescan");
+    schedulerAddTask(wifiCheckConnection, PRIORITY_LOW,  30000, 0, "WiFiChk");
+    schedulerAddTask(checkTempLog,   PRIORITY_LOW,      2000, 0, "TempLog");
 
-    SerialUSB.println(F("[sched] 10 tasks registered"));
+    SerialUSB.println(F("[sched] 12 tasks registered"));
 
     // Ready beep
     tone(PIN_BUZZER, 2000, 100);
