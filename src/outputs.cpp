@@ -17,6 +17,8 @@ static int      currentStep  = 0;
 static unsigned long holdStartMs  = 0;
 static unsigned long holdDurationMs = 0;
 static unsigned long lastPIDTime  = 0;
+static unsigned long runStartMs   = 0;
+static unsigned long stepStartMs  = 0;
 
 // ─── Auto-Tune state ────────────────────────────────────────────────────────
 static int8_t  atSensor    = -1;   // -1 = inactive
@@ -30,13 +32,20 @@ static unsigned long atStartMs = 0;
 
 // ─── Output Control ─────────────────────────────────────────────────────────
 
+// ─── SSR Software Time-Proportioning ────────────────────────────────────
+// Instead of hardware PWM (which the SSR can't use), we toggle the SSR
+// pin on/off over a 2-second window.  60% duty → HIGH for 1.2s, LOW for 0.8s.
+#define SSR_WINDOW_MS  2000UL
+static unsigned long ssrWindowStart = 0;
+
 void initOutputs() {
     for (int i = 0; i < NUM_OUTPUTS; i++) {
         pinMode(OUTPUT_PINS[i], OUTPUT);
         digitalWrite(OUTPUT_PINS[i], LOW);
     }
-    pinMode(PIN_SSR_PWM, OUTPUT);
-    analogWrite(PIN_SSR_PWM, 0);
+    // SSR pin is already in OUTPUT_PINS, just make sure it's LOW
+    digitalWrite(PIN_SSR, LOW);
+    ssrWindowStart = millis();
     SerialUSB.println(F("Outputs: all OFF"));
 }
 
@@ -57,11 +66,36 @@ bool getOutput(int index) {
 
 void setSSRPWM(int duty) {
     ssrPWMDuty = constrain(duty, 0, 255);
-    analogWrite(PIN_SSR_PWM, ssrPWMDuty);
+    // Actual pin toggling happens in updateSSRPWM() called by scheduler
 }
 
 int getSSRPWM() {
     return ssrPWMDuty;
+}
+
+// Called every scheduler cycle (CRITICAL priority, first task).
+// Time-proportions the SSR pin over a 2-second window.
+void updateSSRPWM() {
+    unsigned long now = millis();
+    unsigned long elapsed = now - ssrWindowStart;
+    if (elapsed >= SSR_WINDOW_MS) {
+        ssrWindowStart = now;
+        elapsed = 0;
+    }
+
+    // Fast path: fully off or fully on — no toggling needed
+    if (ssrPWMDuty == 0) {
+        digitalWrite(PIN_SSR, LOW);
+        return;
+    }
+    if (ssrPWMDuty >= 255) {
+        digitalWrite(PIN_SSR, HIGH);
+        return;
+    }
+
+    // On-time in ms for this window  (duty 0-255 → 0-2000 ms)
+    unsigned long onMs = ((unsigned long)ssrPWMDuty * SSR_WINDOW_MS) / 255UL;
+    digitalWrite(PIN_SSR, (elapsed < onMs) ? HIGH : LOW);
 }
 
 void allOutputsOff() {
@@ -90,6 +124,8 @@ void startProfile() {
     currentStep = 0;
     initPID();
     runState = RUN_HEATING;
+    runStartMs = millis();
+    stepStartMs = runStartMs;
     holdDurationMs = (unsigned long)prof.steps[0].holdMinutes * 60UL * 1000UL;
 
     logRunStart(prof.numSteps);
@@ -138,6 +174,16 @@ unsigned long getHoldRemaining() {
     unsigned long elapsed = millis() - holdStartMs;
     if (elapsed >= holdDurationMs) return 0;
     return (holdDurationMs - elapsed) / 1000UL;
+}
+
+unsigned long getRunElapsed() {
+    if (runState == RUN_IDLE) return 0;
+    return (millis() - runStartMs) / 1000UL;
+}
+
+unsigned long getStepElapsed() {
+    if (runState == RUN_IDLE) return 0;
+    return (millis() - stepStartMs) / 1000UL;
 }
 
 // Drive the specified output
@@ -246,6 +292,7 @@ void updatePID() {
                 currentStep++;
                 initPID();
                 runState = RUN_HEATING;
+                stepStartMs = millis();
                 holdDurationMs = (unsigned long)prof.steps[currentStep].holdMinutes * 60UL * 1000UL;
                 float nextTarget = prof.steps[currentStep].numAssignments > 0 ?
                     prof.steps[currentStep].assignments[0].targetTemp : 0;

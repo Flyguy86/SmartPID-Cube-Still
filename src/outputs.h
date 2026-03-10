@@ -6,6 +6,7 @@ void setOutput(int index, bool state);
 bool getOutput(int index);
 void setSSRPWM(int duty);
 int  getSSRPWM();
+void updateSSRPWM();       // Software time-proportioning — call from scheduler
 void allOutputsOff();
 
 // PID / Run profile
@@ -15,6 +16,8 @@ void          startProfile();
 void          stopProfile();
 RunState      getRunState();
 unsigned long getHoldRemaining();  // seconds remaining in hold phase
+unsigned long getRunElapsed();     // seconds since profile started
+unsigned long getStepElapsed();    // seconds since current step started
 int           getCurrentStep();    // 0-based index of current step
 int           getTotalSteps();     // total steps in profile
 

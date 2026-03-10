@@ -118,8 +118,9 @@ void setup() {
     // ── Register tasks with priority scheduler ──────────────────────────────
     schedulerInit();
 
-    // CRITICAL (Priority 0) — Safety: sensors + PID + UI/ESTOP must never be starved
+    // CRITICAL (Priority 0) — Safety: SSR toggle + sensors + PID + UI/ESTOP
     // These also run via yieldCritical() inside blocking WiFi waits
+    schedulerAddTask(updateSSRPWM,   PRIORITY_CRITICAL, 0,    0, "SSR");  // first!
     schedulerAddTask(updateSensors,  PRIORITY_CRITICAL, 0,    0, "Sensors");
     schedulerAddTask(updatePID,      PRIORITY_CRITICAL, 0,    0, "PID");
     schedulerAddTask(updateUI,       PRIORITY_CRITICAL, 20,   0, "Buttons");
@@ -178,7 +179,22 @@ static void processSerialCmd(const char* cmd) {
     if (strncmp(cmd, "pin ", 4) == 0) {
         int p = atoi(cmd + 4);
         scanAutoStop();
-        scanSetPin(p);
+        scanSetPinState(p, true);
+        SerialUSB.print(F("OK pin "));
+        SerialUSB.print(p);
+        SerialUSB.print(F(" "));
+        SerialUSB.print(pinPortName(p));
+        SerialUSB.println(F(" HIGH"));
+    }
+    else if (strncmp(cmd, "pinlo ", 6) == 0) {
+        int p = atoi(cmd + 6);
+        scanAutoStop();
+        scanSetPinState(p, false);
+        SerialUSB.print(F("OK pin "));
+        SerialUSB.print(p);
+        SerialUSB.print(F(" "));
+        SerialUSB.print(pinPortName(p));
+        SerialUSB.println(F(" LOW"));
     }
     else if (strncmp(cmd, "pwm ", 4) == 0) {
         // "pwm 10 255"
@@ -187,20 +203,24 @@ static void processSerialCmd(const char* cmd) {
         int v = sp ? atoi(sp + 1) : 255;
         pinMode(p, OUTPUT);
         analogWrite(p, v);
-        SerialUSB.print(F("[scan] analogWrite("));
+        SerialUSB.print(F("OK pwm "));
         SerialUSB.print(p);
-        SerialUSB.print(F(", "));
-        SerialUSB.print(v);
-        SerialUSB.println(F(")"));
+        SerialUSB.print(F(" "));
+        SerialUSB.println(v);
     }
     else if (strcmp(cmd, "off") == 0) {
         scanAllOff();
+        SerialUSB.println(F("OK off"));
     }
     else if (strcmp(cmd, "scan") == 0) {
         scanAutoStart();
+        SerialUSB.println(F("OK scan"));
+    }
+    else if (strcmp(cmd, "status") == 0) {
+        SerialUSB.println(F("OK v1.2"));
     }
     else {
-        SerialUSB.println(F("[scan] Commands: pin N | off | scan | pwm N V"));
+        SerialUSB.println(F("Commands: pin N | pinlo N | off | scan | pwm N V | status"));
     }
 }
 

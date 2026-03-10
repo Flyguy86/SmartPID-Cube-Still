@@ -468,18 +468,23 @@ static void handlePinTest(int connId, const char* query) {
     char val[8];
     if (getParam(query, "p", val, sizeof(val))) {
         int p = atoi(val);
+        bool high = true;
+        char sval[4];
+        if (getParam(query, "s", sval, sizeof(sval))) {
+            high = (atoi(sval) != 0);
+        }
         if (p < 0) {
             scanAllOff();
         } else {
-            scanSetPin(p);
+            scanSetPinState(p, high);
         }
         // Respond with pin state
         char resp[96];
         int active = scanGetActivePin();
         if (active >= 0) {
             snprintf(resp, sizeof(resp),
-                "{\"ok\":true,\"pin\":%d,\"port\":\"%s\",\"state\":\"HIGH\"}",
-                active, pinPortName(active));
+                "{\"ok\":true,\"pin\":%d,\"port\":\"%s\",\"state\":\"%s\"}",
+                active, pinPortName(active), high ? "HIGH" : "LOW");
         } else {
             strcpy(resp, "{\"ok\":true,\"pin\":-1,\"state\":\"OFF\"}");
         }

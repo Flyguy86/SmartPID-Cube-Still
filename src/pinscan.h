@@ -15,6 +15,7 @@ const char* pinPortName(int arduinoPin);
 
 // Set a single pin HIGH (turns off previous pin first)
 void scanSetPin(int arduinoPin);
+void scanSetPinState(int arduinoPin, bool high);
 
 // Turn off all scanned pins
 void scanAllOff();

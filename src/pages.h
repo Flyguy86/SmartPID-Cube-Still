@@ -214,7 +214,7 @@ a{color:#ff6b35}
 <div class="msg" id="msg">Saved!</div>
 <div class="nav"><a href="/">&larr; Dashboard</a> &middot; <a href="/settings">&#9881; Settings</a> &middot; <a href="/log">&#128202; Run Log</a></div>
 <script>
-var CP=0,AP=0,P=[],D=[],ON=['SSR','RL1','RL2','DC1','DC2'],_busy=0;
+var CP=0,AP=0,P=[{name:'',n:0},{name:'',n:0},{name:'',n:0}],D=[],ON=['SSR','RL1','RL2','DC1','DC2'],_busy=0;
 function gate(fn){if(_busy)return;_busy=1;setTimeout(function(){_busy=0},2000);fn();}
 function selP(p){gate(function(){CP=p;
  var sv=document.querySelector('.save');sv.disabled=false;sv.style.opacity='1';
@@ -300,7 +300,7 @@ function safeFetch(url,retries){
   function tryIt(){
    attempt++;
    var ctrl=new AbortController();
-   var timer=setTimeout(function(){ctrl.abort();},6000);
+   var timer=setTimeout(function(){ctrl.abort();},15000);
    fetch(url,{signal:ctrl.signal}).then(function(r){
     clearTimeout(timer);
     if(!r.ok)throw new Error('HTTP '+r.status);
@@ -324,7 +324,7 @@ function retryFetch(url,retries){
   function tryIt(){
    attempt++;
    var ctrl=new AbortController();
-   var timer=setTimeout(function(){ctrl.abort();},6000);
+   var timer=setTimeout(function(){ctrl.abort();},15000);
    fetch(url,{signal:ctrl.signal}).then(function(r){
     clearTimeout(timer);
     if(!r.ok)throw new Error('HTTP '+r.status);
@@ -372,8 +372,9 @@ function saveAll(){readUI();
   }
   return next();
  }).then(function(){
-  P[CP].name=name;P[CP].n=D.length;
-  for(var j=0;j<3;j++)document.getElementById('pb'+j).textContent=P[j].name||('P'+(j+1));
+  if(P[CP])P[CP].name=name;
+  if(P[CP])P[CP].n=D.length;
+  for(var j=0;j<3;j++)document.getElementById('pb'+j).textContent=(P[j]&&P[j].name)||('P'+(j+1));
  }).catch(function(e){
   console.error('saveAll error:',e);
   fail('Save failed: '+e.message);

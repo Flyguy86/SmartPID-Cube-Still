@@ -66,7 +66,7 @@ static void drawSplash() {
     oled.setCursor(20, 26);
     oled.print(F("Still Controller"));
     oled.setCursor(46, 42);
-    oled.print(F("v1.1"));
+    oled.print(F("v1.4"));
     oled.drawRect(0, 0, 128, 64, SSD1306_WHITE);
 }
 
@@ -149,6 +149,17 @@ static void drawDashboard() {
                 oled.print(cs + 1);
                 oled.print(F("/"));
                 oled.print(prof.numSteps);
+                // Elapsed time for this step
+                oled.setCursor(90, 31);
+                { unsigned long se = getStepElapsed();
+                  unsigned long sm = se / 60;
+                  unsigned long ss = se % 60;
+                  if (sm < 10) oled.print('0');
+                  oled.print(sm);
+                  oled.print(':');
+                  if (ss < 10) oled.print('0');
+                  oled.print(ss);
+                }
                 oled.setCursor(0, 41);
                 if (step.numAssignments > 0) {
                     oled.print(F("Tgt:"));
@@ -179,6 +190,21 @@ static void drawDashboard() {
                 oled.print(sec);
                 oled.print(F("s PWM:"));
                 oled.print(getSSRPWM());
+                // Total run elapsed on right
+                oled.setCursor(84, 31);
+                { unsigned long re = getRunElapsed();
+                  unsigned long rh = re / 3600;
+                  unsigned long rm = (re % 3600) / 60;
+                  unsigned long rs2 = re % 60;
+                  if (rh > 0) {
+                      oled.print(rh); oled.print(':');
+                      if (rm < 10) oled.print('0');
+                  }
+                  oled.print(rm);
+                  oled.print(':');
+                  if (rs2 < 10) oled.print('0');
+                  oled.print(rs2);
+                }
                 break;
             }
             case RUN_DONE:
@@ -494,10 +520,10 @@ void handleButton(ButtonEvent evt) {
         case SCREEN_PINTOGGLE:
             switch (evt) {
                 case BTN_UP_PRESS:
-                    if (ptIdx > 0) ptIdx--;
+                    if (ptIdx < NUM_SCAN_PINS - 1) ptIdx++;
                     break;
                 case BTN_DOWN_PRESS:
-                    if (ptIdx < NUM_SCAN_PINS - 1) ptIdx++;
+                    if (ptIdx > 0) ptIdx--;
                     break;
                 case BTN_SELECT_PRESS: {
                     // Toggle selected pin

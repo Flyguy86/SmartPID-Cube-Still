@@ -13,12 +13,32 @@ Custom firmware for the **SmartPID CUBE** hardware, repurposed as a beer/spirits
 ### I/O
 
 - **2× DS18B20** temperature probes (lower + upper, OneWire, 12-bit async)
-- **SSR** with hardware PWM (TC3) for PID-controlled heating
-- **2× Relay** outputs (on/off)
-- **2× DC** outputs
-- **Piezo buzzer** for status tones
-- **4 buttons** (Up/Down/Select/Start-Stop)
-- **OLED display** (I2C, 0x3C) — not yet implemented in this firmware
+- **SSR** on D24/PB11 for PID-controlled heating
+- **2× Relay** outputs (D30/PA24, D31/PA25)
+- **Piezo buzzer** (D2/PA14) for status tones
+- **4 buttons** (Up=D14, Down=D17, Select=D8, Start-Stop=D9)
+- **OLED display** (I2C SDA=D20, SCL=D21, address 0x3C)
+
+#### Pin Map (Physically Confirmed)
+
+| Function | Arduino Pin | SAMD21 Port |
+|----------|-------------|-------------|
+| SSR | D24 | PB11 |
+| Relay 1 | D30 | PA24 |
+| Relay 2 | D31 | PA25 |
+| Buzzer | D2 | PA14 |
+| Sensor Lower | D3 | PA09 |
+| Sensor Upper | D4 | PA08 |
+| BTN UP | D14 | PA02 |
+| BTN DOWN | D17 | PA04 |
+| BTN SELECT | D8 | PA06 |
+| BTN S/S | D9 | PA07 |
+| I2C SDA | D20 | PA22 |
+| I2C SCL | D21 | PA23 |
+| ESP8266 TX | D0 | PA11 |
+| ESP8266 RX | D1 | PA10 |
+
+See [PINMAP.md](PINMAP.md) for full reverse-engineering details.
 
 ### Bootloader & Flashing
 
@@ -150,6 +170,46 @@ sync && echo "Flash complete — power cycle now"
 - Integral anti-windup clamping
 - Configurable output routing (any sensor → any output)
 
+### SSR Power Control (Software Time-Proportioning)
+
+The SSR (Solid State Relay) is a simple on/off switch — it cannot accept a hardware PWM signal. Instead, the firmware uses **software time-proportioning** to control heating power: the SSR pin is toggled HIGH/LOW over a **2-second window**, where the on-time is proportional to the requested duty cycle.
+
+#### PID → PWM → SSR Pipeline
+
+1. **PID computes an output (0–255)** every 1 second:
+   - **P** = `Kp × error` — proportional push (big error → big output)
+   - **I** = `Ki × ∫error·dt` — accumulated error over time (eliminates steady-state offset)
+   - **D** = `Kd × d(temp)/dt` — dampens overshoot by reacting to rate of change
+   - Output = P + I + D, clamped to `[0, maxPWM]`
+
+2. **`setSSRPWM(duty)`** stores the 0–255 duty value.
+
+3. **`updateSSRPWM()`** runs every scheduler cycle (highest-priority CRITICAL task) and toggles the pin over a 2-second window:
+
+| Duty (0–255) | Percent | SSR On-Time | SSR Off-Time |
+|-------------|---------|-------------|---------------|
+| 0 | 0% | 0s (always off) | 2.0s |
+| 64 | 25% | 0.5s | 1.5s |
+| 128 | 50% | 1.0s | 1.0s |
+| 153 | 60% | 1.2s | 0.8s |
+| 191 | 75% | 1.5s | 0.5s |
+| 255 | 100% | 2.0s (always on) | 0s |
+
+#### Practical Example
+
+With target = 170°F and Kp = 10:
+
+| Current Temp | Error | PID Output | SSR Duty | Heater Behavior |
+|-------------|-------|-----------|----------|------------------|
+| 150°F | 20°F | ~200 (capped by maxPWM) | ~78% | 1.57s on, 0.43s off |
+| 165°F | 5°F | ~50 | ~20% | 0.39s on, 1.61s off |
+| 169°F | 1°F | ~10 | ~4% | 0.08s on, 1.92s off |
+| 170°F | 0°F | ~0 | 0% | always off |
+
+As temperature approaches the target, the PID output shrinks, the on-time shrinks, and the heater delivers progressively less power — giving a smooth approach without overshooting. The **I term** handles steady-state offset (e.g., heat loss keeps you 2°F low — the integral slowly increases duty to compensate). The **D term** prevents overshoot by reducing output when temperature is rising fast.
+
+The `maxPWM` field in each profile step caps the maximum duty — so you can limit a step to e.g. 60% power if you don't want full-blast heating.
+
 ### PID Auto-Tune
 - Relay-based Ziegler-Nichols oscillation method
 - Runs bang-bang control around current temperature
@@ -184,10 +244,12 @@ The single-core SAMD21 runs a non-preemptive priority scheduler that ensures saf
 
 | Priority | Level | Tasks | Interval |
 |----------|-------|-------|----------|
-| 0 — CRITICAL | Safety | `updateSensors`, `updatePID` | Every cycle |
-| 1 — HIGH | User experience | `wifiPoll` | Every cycle |
+| 0 — CRITICAL | Safety | `updateSSRPWM`, `updateSensors`, `updatePID`, `updateUI` | Every cycle |
+| 1 — HIGH | User experience | `wifiPoll`, `updateDisplay` | Every cycle / 250ms |
 | 2 — NORMAL | Feature | `updateAutoTune` | Every cycle |
-| 3 — LOW | Diagnostics | `debugPrint` (5s), `schedulerPrintStats` (30s) | Timed |
+| 3 — LOW | Diagnostics | `debugPrint` (5s), `schedulerPrintStats` (30s), `rescanSensors` (5s), `wifiCheckConnection` (30s), `checkTempLog` (2s) | Timed |
+
+> **Note:** `updateSSRPWM` is registered first among CRITICAL tasks so the SSR pin toggling is never delayed by sensor reads or PID computation.
 
 **Key mechanism:** All blocking WiFi wait loops (`espCmd`, `espSendChunk`) call `yieldCritical()` when no serial data is available. This runs the sensor and PID tasks inline — the PID loop never misses its 1-second window even during multi-chunk HTML page transfers.
 
@@ -303,22 +365,4 @@ For flashing, see the [Bootloader & Flashing](#bootloader--flashing) section abo
 
 ## Pin Map
 
-See [PINMAP.md](PINMAP.md) for the complete reverse-engineered pin assignment table with disassembly evidence.
-
-| Function | Arduino Pin | SAMD21 |
-|----------|-------------|--------|
-| DS18B20 Lower | 3 | PA09 |
-| DS18B20 Upper | 4 | PA08 |
-| SSR (digital) | 22 | PA12 |
-| SSR (PWM) | 10 | PA18 |
-| Relay 1 | 6 | PA20 |
-| Relay 2 | 7 | PA21 |
-| DC Out 1 | 26 | PA27 |
-| DC Out 2 | 27 | PA28 |
-| Buzzer | 2 | PA14 |
-| Button Up | 14 | PA02 |
-| Button Down | 17 | PA04 |
-| Button Select | 8 | PA06 |
-| Button S/S | 9 | PA07 |
-| ESP8266 TX | 30 | PB22 |
-| ESP8266 RX | 31 | PB23 |
+See [PINMAP.md](PINMAP.md) for the complete reverse-engineered pin assignment table with disassembly evidence and physical test results.

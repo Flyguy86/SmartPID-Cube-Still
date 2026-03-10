@@ -12,10 +12,10 @@
 #define PIN_DS18B20_UPPER   4   // PA08 — Upper probe connector (OneWire)
 
 // ─── Outputs ────────────────────────────────────────────────────────────────
-#define PIN_SSR            22   // PA12 — Solid State Relay (digital on/off)
-#define PIN_SSR_PWM        10   // PA18 — SSR PWM output (TC3 hardware PWM)
-#define PIN_RELAY1          6   // PA20 — Relay 1
-#define PIN_RELAY2          7   // PA21 — Relay 2
+#define PIN_SSR            24   // PB11 — Solid State Relay (confirmed by pin scanner)
+#define PIN_SSR_PWM        24   // PB11 — SSR PWM output (same pin)
+#define PIN_RELAY1         30   // PA24 — Relay 1 (confirmed by pin scanner)
+#define PIN_RELAY2         31   // PA25 — Relay 2 (confirmed by pin scanner)
 #define PIN_DC1            26   // PA27 — DC output 1
 #define PIN_DC2            27   // PA28 — DC output 2
 

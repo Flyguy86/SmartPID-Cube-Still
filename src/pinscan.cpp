@@ -56,6 +56,10 @@ const char* pinPortName(int p) {
 // ─── Pin control ────────────────────────────────────────────────────────────
 
 void scanSetPin(int arduinoPin) {
+    scanSetPinState(arduinoPin, true);
+}
+
+void scanSetPinState(int arduinoPin, bool high) {
     // Turn off previous
     if (activePin >= 0) {
         digitalWrite(activePin, LOW);
@@ -64,13 +68,14 @@ void scanSetPin(int arduinoPin) {
     activePin = arduinoPin;
     if (arduinoPin >= 0) {
         pinMode(arduinoPin, OUTPUT);
-        digitalWrite(arduinoPin, HIGH);
-        if (arduinoPin == 10) analogWrite(10, 255);  // TC3 PWM
+        digitalWrite(arduinoPin, high ? HIGH : LOW);
+        if (arduinoPin == 10) analogWrite(10, high ? 255 : 0);
         SerialUSB.print(F("[scan] Pin D"));
         SerialUSB.print(arduinoPin);
         SerialUSB.print(F(" ("));
         SerialUSB.print(pinPortName(arduinoPin));
-        SerialUSB.println(F(") → HIGH"));
+        SerialUSB.print(high ? F(") → HIGH") : F(") → LOW"));
+        SerialUSB.println();
     }
 }
 

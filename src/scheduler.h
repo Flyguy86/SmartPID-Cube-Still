@@ -31,7 +31,7 @@ enum TaskPriority : uint8_t {
 
 typedef void (*TaskFunc)();
 
-#define MAX_TASKS 10
+#define MAX_TASKS 16
 
 struct Task {
     TaskFunc     func;          // Function to call

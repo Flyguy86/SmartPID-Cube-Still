@@ -43,7 +43,9 @@ pin number at byte 0 of each).
 | **DC2** | 2 | **27** | **PA28** | USB_HE | `movs r2, #0x1b; strb r2, [r3]` at 0x154F0 (offset +0x30) |
 | **RL1** | 3 | **6** | **PA20** | D6 | `movs r2, #6; strb r2, [r3]` at 0x154DC (offset +0x48) |
 | **RL2** | 4 | **7** | **PA21** | D7 | `movs r2, #7; strb r2, [r3]` at 0x154E4 (offset +0x60) |
-
+> **Note:** Physical testing (v1.2 pin scanner, March 2026) showed that Variant 0 pin
+> assignments from disassembly do NOT match the actual board wiring. The hardware uses
+> Variant 1 assignments — see the **Physically Confirmed** section below.
 **Variant 1 — Alternate revision (no WiFi, repurposes UART pins):**
 
 | Output | Index | Arduino Pin | SAMD21 Port | Zero Name |
@@ -56,6 +58,25 @@ pin number at byte 0 of each).
 
 After pin assignment, the init loop (0x154F8–0x15524) iterates 5 times (stride 0x18),
 calling setup and `digitalWrite(pin, 0)` to initialize all outputs LOW.
+
+### Physically Confirmed Pin Assignments (March 2026)
+
+Physical testing with a pin-by-pin GPIO scanner (v1.2 firmware, serial + HTTP API)
+confirmed that the board uses **Variant 1** output pin assignments, NOT Variant 0 as
+initially assumed from the disassembly. Every GPIO pin was individually tested HIGH
+and LOW while observing the physical outputs.
+
+| Function | Arduino Pin | SAMD21 Port | Status |
+|----------|-------------|-------------|--------|
+| **SSR** | **D24** | **PB11** | ✅ Confirmed — relay clicks when HIGH |
+| **Relay 1** | **D30** | **PA24** | ✅ Confirmed — relay clicks when HIGH |
+| **Relay 2** | **D31** | **PA25** | ✅ Confirmed — relay clicks when HIGH |
+| **Buzzer** | **D2** | **PA14** | ✅ Confirmed — already correct in disasm |
+| Buttons | D8, D9, D14, D17 | PA06, PA07, PA02, PA04 | ✅ Confirmed — toggling freezes/breaks input |
+| I2C (OLED) | D20, D21 | PA22, PA23 | ✅ Confirmed — toggling freezes display |
+| Sensors | D3, D4 | PA09, PA08 | ✅ Confirmed — DS18B20 OneWire |
+| DC1 | *Unknown* | — | ❌ Not found by pin scan — may not be wired |
+| DC2 | *Unknown* | — | ❌ Not found by pin scan — may not be wired |
 
 ### Timer/PWM Output (from 0x100F4 → 0x140E2)
 
@@ -151,31 +172,31 @@ Two temperature channels: **Mash Probe** and **HLT Probe**
 | **2** | **PA14** | **Buzzer** | OUTPUT | ✅ Hardcoded |
 | **3** | **PA09** | **DS18B20 Lower sensor input** | OneWire INPUT | ✅ Physical probe ||
 | **4** | **PA08** | **DS18B20 Upper sensor input** | OneWire INPUT | ✅ Physical probe |
-| 5 | PA15 | *Unknown* | — | ❌ |
-| **6** | **PA20** | **RL1 (Relay 1)** | OUTPUT | ✅ Variant 0 |
-| **7** | **PA21** | **RL2 (Relay 2)** | OUTPUT | ✅ Variant 0 |
-| **8** | **PA06** | **Button 3 (SELECT)** | INPUT_PULLUP | ✅ Init at 0x1B62C |
-| **9** | **PA07** | **Button 4 (START/STOP)** | INPUT_PULLUP | ✅ Init at 0x1B63A |
-| **10** | **PA18** | **TC3 PWM (PID SSR)** | OUTPUT/PWM | ✅ TC3 + pinMode |
-| 11 | PA16 | *Unknown / OneWire?* | — | ❌ |
-| 12 | PA19 | *Unknown* | — | ❌ |
-| 13 | PA17 | *Unknown* | — | ❌ |
-| **14** | **PA02** | **Button 1 (UP)** | INPUT_PULLUP | ✅ Init at 0x1B610 |
-| 15 | PB08 | *ADC/Sensor (possible)* | ANALOG | Partial |
+| 5 | PA15 | *Tested — no effect* | — | ❌ |
+| **6** | **PA20** | *Tested — no effect (RL1 in Variant 0 only)* | — | ❌ |
+| **7** | **PA21** | *Tested — no effect (RL2 in Variant 0 only)* | — | ❌ |
+| **8** | **PA06** | **Button 3 (SELECT)** | INPUT_PULLUP | ✅ Physical + disasm |
+| **9** | **PA07** | **Button 4 (START/STOP)** | INPUT_PULLUP | ✅ Physical + disasm |
+| **10** | **PA18** | *Tested — no effect* | — | ❌ |
+| 11 | PA16 | *Tested — no effect* | — | ❌ |
+| 12 | PA19 | *Tested — no effect* | — | ❌ |
+| 13 | PA17 | *Tested — no effect* | — | ❌ |
+| **14** | **PA02** | **Button 1 (UP)** | INPUT_PULLUP | ✅ Physical + disasm |
+| 15 | PB08 | *Tested — no effect* | — | ❌ |
 | **16** | **PB09** | **NTC Analog Sensor** | ANALOG IN | ✅ 5× analogRead |
-| **17** | **PA04** | **Button 2 (DOWN)** | INPUT_PULLUP | ✅ Init at 0x1B61E |
-| 18 | PA05 | *Secondary ADC input* | ANALOG IN | Partial |
-| 19 | PB02 | *Unknown* | — | ❌ |
-| **20** | **PA22** | **I2C SDA (OLED)** | I2C | ✅ SERCOM3 |
-| **21** | **PA23** | **I2C SCL (OLED)** | I2C | ✅ SERCOM3 |
-| **22** | **PA12** | **SSR Output** | OUTPUT | ✅ Variant 0 |
-| 23 | PB10 | *Unused (Variant 0)* | — | — |
-| 24 | PB11 | *Unused (Variant 0)* | — | — |
-| 25 | PB03 | *RX_LED* | — | ❌ |
-| **26** | **PA27** | **DC1 Output** | OUTPUT | ✅ Variant 0 |
-| **27** | **PA28** | **DC2 Output** | OUTPUT | ✅ Variant 0 |
-| **30** | **PB22** | **ESP8266 UART TX** | UART | ✅ SERCOM5 |
-| **31** | **PB23** | **ESP8266 UART RX** | UART | ✅ SERCOM5 |
+| **17** | **PA04** | **Button 2 (DOWN)** | INPUT_PULLUP | ✅ Physical + disasm |
+| 18 | PA05 | *Tested — no effect* | — | ❌ |
+| 19 | PB02 | *Tested — no effect* | — | ❌ |
+| **20** | **PA22** | **I2C SDA (OLED)** | I2C | ✅ Physical (freeze) |
+| **21** | **PA23** | **I2C SCL (OLED)** | I2C | ✅ Physical (freeze) |
+| **22** | **PA12** | *Tested — no effect (SSR in Variant 0 only)* | — | ❌ |
+| 23 | PB10 | *Tested — no effect* | — | ❌ |
+| **24** | **PB11** | **SSR Output** | OUTPUT | ✅ Physical (pin scanner) |
+| 25 | PA27 | *Tested — no effect* | — | ❌ |
+| **26** | **PA27** | *Tested — no effect (DC1 in Variant 0)* | — | ❌ |
+| **27** | **PA28** | *Tested — no effect (DC2 in Variant 0)* | — | ❌ |
+| **30** | **PA24** | **Relay 1** | OUTPUT | ✅ Physical (pin scanner) |
+| **31** | **PA25** | **Relay 2** | OUTPUT | ✅ Physical (pin scanner) |
 
 ---
 
